@@ -20,6 +20,14 @@ Add to your `~/.config/opencode/opencode.json`:
 
 OpenCode will auto-install on first run.
 
+### Manual Install
+
+If auto-install fails, install manually:
+
+```bash
+bun add @a3fckx/opencode-multi-auth --cwd ~/.config/opencode
+```
+
 ### From Source
 
 ```bash
