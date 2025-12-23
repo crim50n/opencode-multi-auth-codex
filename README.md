@@ -2,9 +2,25 @@
 
 Multi-account OAuth rotation for OpenAI Codex. Auto-rotates between your ChatGPT Plus/Pro accounts.
 
+[![npm version](https://img.shields.io/npm/v/@a3fckx/opencode-multi-auth.svg)](https://www.npmjs.com/package/@a3fckx/opencode-multi-auth)
+
 > **Based on [opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth) by [@nummanali](https://x.com/nummanali)**. Forked and modified to add multi-account rotation support.
 
 ## Installation
+
+### Via npm (Recommended)
+
+Add to your `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "plugin": ["@a3fckx/opencode-multi-auth"]
+}
+```
+
+OpenCode will auto-install on first run.
+
+### From Source
 
 ```bash
 git clone https://github.com/a3fckx/opencode-multi-auth.git
@@ -61,19 +77,17 @@ Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": [
-    "file:///path/to/opencode-multi-auth"
-  ]
+  "plugin": ["@a3fckx/opencode-multi-auth"]
 }
 ```
 
-Or if using alongside other plugins:
+Or with other plugins:
 
 ```json
 {
   "plugin": [
     "oh-my-opencode",
-    "file:///path/to/opencode-multi-auth"
+    "@a3fckx/opencode-multi-auth"
   ]
 }
 ```
@@ -101,7 +115,6 @@ Or if using alongside other plugins:
 
 ## Requirements
 
-- Bun runtime
 - ChatGPT Plus/Pro subscription(s)
 - OpenCode CLI
 
