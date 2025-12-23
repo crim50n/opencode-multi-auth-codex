@@ -2,6 +2,8 @@
 
 Multi-account OAuth rotation for OpenAI Codex. Auto-rotates between your ChatGPT Plus/Pro accounts.
 
+> **Based on [opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth) by [@nummanali](https://x.com/nummanali)**. Forked and modified to add multi-account rotation support.
+
 ## Installation
 
 ```bash
@@ -102,6 +104,11 @@ Or if using alongside other plugins:
 - Bun runtime
 - ChatGPT Plus/Pro subscription(s)
 - OpenCode CLI
+
+## Credits
+
+- Original OAuth implementation: [numman-ali/opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth)
+- Multi-account rotation: [@a3fckx](https://github.com/a3fckx)
 
 ## License
 
