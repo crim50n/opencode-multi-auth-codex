@@ -1,20 +1,14 @@
+import type { Plugin, PluginInput } from '@opencode-ai/plugin'
+import type { Auth } from '@opencode-ai/sdk'
+import { loginAccount } from './auth.js'
 import { getNextAccount, markRateLimited } from './rotation.js'
-import { getModels } from './models.js'
 import { listAccounts, loadStore } from './store.js'
 import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
-interface OpenCodePlugin {
-  name: string
-  version: string
-  provider: {
-    name: string
-    options?: Record<string, unknown>
-    models: () => Promise<Record<string, unknown>>
-    call: (model: string, messages: unknown[], options?: unknown) => Promise<unknown>
-  }
-}
-
+const PROVIDER_ID = 'openai'
 const CODEX_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
+const REDIRECT_PORT = 1455
+const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`
 
 let pluginConfig: PluginConfig = { ...DEFAULT_CONFIG }
 
@@ -22,102 +16,167 @@ export function configure(config: Partial<PluginConfig>): void {
   pluginConfig = { ...pluginConfig, ...config }
 }
 
-interface ErrorResponse {
-  error?: { message?: string }
-}
+/**
+ * Multi-account OAuth plugin for OpenCode
+ *
+ * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
+ */
+export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
+  return {
+    auth: {
+      provider: PROVIDER_ID,
 
-async function callOpenAI(
-  model: string,
-  messages: unknown[],
-  options: unknown = {}
-): Promise<unknown> {
-  const opts = (options ?? {}) as Record<string, unknown>
-  const rotation = await getNextAccount(pluginConfig)
+      /**
+       * Loader configures the SDK with multi-account rotation
+       */
+      async loader(getAuth: () => Promise<Auth>, provider: unknown) {
+        const accounts = listAccounts()
 
-  if (!rotation) {
-    throw new Error('[multi-auth] No available accounts. Add accounts first.')
-  }
+        if (accounts.length === 0) {
+          console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>')
+          return {}
+        }
 
-  const { account, token } = rotation
-  const baseModel = model.replace(/-(?:none|low|medium|high|xhigh)$/, '')
+        // Custom fetch with multi-account rotation
+        const customFetch = async (
+          input: Request | string | URL,
+          init?: RequestInit
+        ): Promise<Response> => {
+          const rotation = await getNextAccount(pluginConfig)
 
-  const reasoningMatch = model.match(/-(none|low|medium|high|xhigh)$/)
-  const reasoningEffort = reasoningMatch?.[1] || opts.reasoningEffort || 'medium'
+          if (!rotation) {
+            return new Response(
+              JSON.stringify({ error: { message: 'No available accounts' } }),
+              { status: 503, headers: { 'Content-Type': 'application/json' } }
+            )
+          }
 
-  const payload = {
-    model: baseModel,
-    messages,
-    ...opts,
-    reasoning_effort: reasoningEffort,
-    store: false
-  }
+          const { account, token } = rotation
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
 
-  try {
-    const res = await fetch(CODEX_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
+          // Parse and transform request body
+          const body = init?.body ? JSON.parse(init.body as string) : {}
+          const baseModel = body.model?.replace(/-(?:none|low|medium|high|xhigh)$/, '') || body.model
+          const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/)
+          const reasoningEffort = reasoningMatch?.[1] || body.reasoningEffort || 'medium'
+
+          const payload = {
+            ...body,
+            model: baseModel,
+            reasoning_effort: reasoningEffort,
+            store: false
+          }
+
+          try {
+            const res = await fetch(url, {
+              method: init?.method || 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+                ...(init?.headers as Record<string, string>)
+              },
+              body: JSON.stringify(payload)
+            })
+
+            // Handle rate limiting with automatic rotation
+            if (res.status === 429) {
+              markRateLimited(account.alias, pluginConfig.rateLimitCooldownMs)
+
+              // Try another account
+              const retryRotation = await getNextAccount(pluginConfig)
+              if (retryRotation && retryRotation.account.alias !== account.alias) {
+                return customFetch(input, init)
+              }
+
+              // All accounts exhausted
+              const errorData = await res.json().catch(() => ({})) as { error?: { message?: string } }
+              return new Response(
+                JSON.stringify({
+                  error: {
+                    message: `[multi-auth] Rate limited on all accounts. ${errorData.error?.message || ''}`
+                  }
+                }),
+                { status: 429, headers: { 'Content-Type': 'application/json' } }
+              )
+            }
+
+            return res
+          } catch (err) {
+            return new Response(
+              JSON.stringify({ error: { message: `[multi-auth] Request failed: ${err}` } }),
+              { status: 500, headers: { 'Content-Type': 'application/json' } }
+            )
+          }
+        }
+
+        // Return SDK configuration with custom fetch for rotation
+        return {
+          apiKey: 'multi-auth', // Placeholder, we use our own tokens
+          baseURL: 'https://api.openai.com/v1',
+          fetch: customFetch
+        }
       },
-      body: JSON.stringify(payload)
-    })
 
-    if (res.status === 429) {
-      markRateLimited(account.alias, pluginConfig.rateLimitCooldownMs)
+      methods: [
+        {
+          label: 'ChatGPT OAuth (Multi-Account)',
+          type: 'oauth' as const,
 
-      const retryRotation = await getNextAccount(pluginConfig)
-      if (retryRotation && retryRotation.account.alias !== account.alias) {
-        return callOpenAI(model, messages, opts)
-      }
+          prompts: [
+            {
+              type: 'text' as const,
+              key: 'alias',
+              message: 'Account alias (e.g., personal, work)',
+              placeholder: 'personal'
+            }
+          ],
 
-      const errorData = (await res.json().catch(() => ({}))) as ErrorResponse
-      throw new Error(
-        `[multi-auth] Rate limited on all accounts. ` +
-        `Reset: ${errorData.error?.message || 'unknown'}`
-      )
+          /**
+           * OAuth flow - opens browser for ChatGPT login
+           */
+          authorize: async (inputs?: Record<string, string>) => {
+            const alias = inputs?.alias || `account-${Date.now()}`
+
+            // Start OAuth server and get URL
+            const authUrl = new URL('https://auth.openai.com/authorize')
+            authUrl.searchParams.set('client_id', 'pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh')
+            authUrl.searchParams.set('redirect_uri', REDIRECT_URI)
+            authUrl.searchParams.set('response_type', 'code')
+            authUrl.searchParams.set('scope', 'openid profile email offline_access')
+            authUrl.searchParams.set('audience', 'https://api.openai.com/v1')
+
+            return {
+              url: authUrl.toString(),
+              method: 'auto' as const,
+              instructions: `Login with your ChatGPT Plus/Pro account for "${alias}"`,
+
+              callback: async () => {
+                try {
+                  const account = await loginAccount(alias)
+                  return {
+                    type: 'success' as const,
+                    provider: PROVIDER_ID,
+                    refresh: account.refreshToken,
+                    access: account.accessToken,
+                    expires: account.expiresAt
+                  }
+                } catch {
+                  return { type: 'failed' as const }
+                }
+              }
+            }
+          }
+        },
+        {
+          label: 'Skip (use existing accounts)',
+          type: 'api' as const
+        }
+      ]
     }
-
-    if (!res.ok) {
-      const errorData = (await res.json().catch(() => ({}))) as ErrorResponse
-      throw new Error(
-        `[multi-auth] API error ${res.status}: ${errorData.error?.message || res.statusText}`
-      )
-    }
-
-    return await res.json()
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('[multi-auth]')) {
-      throw err
-    }
-    throw new Error(`[multi-auth] Request failed: ${err}`)
   }
 }
 
-export const plugin: OpenCodePlugin = {
-  name: 'opencode-multi-auth',
-  version: '1.0.0',
-
-  provider: {
-    name: 'openai',
-
-    options: {
-      reasoningEffort: 'medium',
-      reasoningSummary: 'auto',
-      textVerbosity: 'medium',
-      include: ['reasoning.encrypted_content'],
-      store: false
-    },
-
-    models: async () => {
-      const accounts = listAccounts()
-      const token = accounts[0]?.accessToken
-      return getModels(token)
-    },
-
-    call: callOpenAI
-  }
-}
-
+// CLI helpers (unchanged)
 export function status(): void {
   const store = loadStore()
   const accounts = Object.values(store.accounts)
@@ -149,6 +208,5 @@ export function status(): void {
 
 export { loginAccount } from './auth.js'
 export { addAccount, removeAccount, listAccounts } from './store.js'
-export { getModels } from './models.js'
 export { DEFAULT_CONFIG } from './types.js'
-export default plugin
+export default MultiAuthPlugin

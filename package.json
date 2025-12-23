@@ -1,6 +1,6 @@
 {
   "name": "@a3fckx/opencode-multi-auth",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
   "main": "dist/index.js",
@@ -9,12 +9,13 @@
     "opencode-multi-auth": "dist/cli.js"
   },
   "scripts": {
-    "build": "bun build --target node ./src/index.ts ./src/cli.ts --outdir ./dist --external @openauthjs/openauth",
+    "build": "bun build --target node ./src/index.ts ./src/cli.ts --outdir ./dist --external @openauthjs/openauth --external @opencode-ai/plugin --external @opencode-ai/sdk",
     "dev": "bun run build",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@openauthjs/openauth": "^0.4.3"
+    "@openauthjs/openauth": "^0.4.3",
+    "@opencode-ai/plugin": "^1.0.162"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
