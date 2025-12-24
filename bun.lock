@@ -6,11 +6,15 @@
       "name": "opencode-multi-auth",
       "dependencies": {
         "@openauthjs/openauth": "^0.4.3",
-        "@opencode-ai/plugin": "^1.0.162",
       },
       "devDependencies": {
+        "@opencode-ai/plugin": "^1.0.193",
+        "@opencode-ai/sdk": "^1.0.193",
         "@types/node": "^22.10.2",
         "typescript": "^5.7.2",
+      },
+      "peerDependencies": {
+        "@opencode-ai/plugin": "^1.0.150",
       },
     },
   },
