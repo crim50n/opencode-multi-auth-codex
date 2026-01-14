@@ -6,6 +6,26 @@ Multi-account OAuth rotation for OpenAI Codex. Auto-rotates between your ChatGPT
 
 > **Based on [opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth) by [@nummanali](https://x.com/nummanali)**. Forked and modified to add multi-account rotation support.
 
+## Patched Build (Codex Backend Compatible)
+
+This fork patches the plugin to talk to **ChatGPT Codex backend** (`chatgpt.com/backend-api`) with the same headers and request shape as the official Codex OAuth plugin.
+
+**Install from GitHub (recommended for this fork):**
+
+```bash
+bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
+```
+
+Then keep the plugin entry as-is in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "plugin": ["@a3fckx/opencode-multi-auth"]
+}
+```
+
+If you already installed the npm version, re-run the GitHub install command above to override it.
+
 ## Installation
 
 ### Via npm (Recommended)

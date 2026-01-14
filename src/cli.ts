@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { loginAccount } from './auth.js'
-import { removeAccount, listAccounts, getStorePath } from './store.js'
-import { status } from './index.js'
+import { removeAccount, listAccounts, getStorePath, loadStore } from './store.js'
 
 const args = process.argv.slice(2)
 const command = args[0]
@@ -56,7 +55,32 @@ async function main(): Promise<void> {
     }
 
     case 'status': {
-      status()
+      const store = loadStore()
+      const accounts = Object.values(store.accounts)
+
+      console.log('\n[multi-auth] Account Status\n')
+      console.log('Strategy: round-robin')
+      console.log(`Accounts: ${accounts.length}`)
+      console.log(`Active: ${store.activeAlias || 'none'}\n`)
+
+      if (accounts.length === 0) {
+        console.log('No accounts configured. Run: opencode-multi-auth add <alias>\n')
+        return
+      }
+
+      for (const acc of accounts) {
+        const isActive = acc.alias === store.activeAlias ? ' (active)' : ''
+        const isRateLimited = acc.rateLimitedUntil && acc.rateLimitedUntil > Date.now()
+          ? ` [RATE LIMITED until ${new Date(acc.rateLimitedUntil).toLocaleTimeString()}]`
+          : ''
+        const expiry = new Date(acc.expiresAt).toLocaleString()
+
+        console.log(`  ${acc.alias}${isActive}${isRateLimited}`)
+        console.log(`    Email: ${acc.email || 'unknown'}`)
+        console.log(`    Uses: ${acc.usageCount}`)
+        console.log(`    Token expires: ${expiry}`)
+        console.log()
+      }
       break
     }
 

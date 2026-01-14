@@ -1,14 +1,17 @@
-import { createClient } from '@openauthjs/openauth/client'
+import { generatePKCE } from '@openauthjs/openauth/pkce'
+import { randomBytes } from 'node:crypto'
 import * as http from 'http'
 import * as url from 'url'
-import { addAccount, updateAccount, loadStore, saveStore } from './store.js'
+import { addAccount, updateAccount, loadStore } from './store.js'
 import type { AccountCredentials } from './types.js'
 
 // OpenAI OAuth endpoints (same as official Codex CLI)
 const OPENAI_ISSUER = 'https://auth.openai.com'
-const CLIENT_ID = 'pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh' // Public client ID
+const AUTHORIZE_URL = `${OPENAI_ISSUER}/oauth/authorize`
+const TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`
+const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const REDIRECT_PORT = 1455
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`
+const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/auth/callback`
 const SCOPES = ['openid', 'profile', 'email', 'offline_access']
 
 interface TokenResponse {
@@ -18,13 +21,39 @@ interface TokenResponse {
   token_type: string
 }
 
-export async function loginAccount(alias: string): Promise<AccountCredentials> {
-  return new Promise((resolve, reject) => {
-    const client = createClient({
-      clientID: CLIENT_ID,
-      issuer: OPENAI_ISSUER
-    })
+interface AuthorizationFlow {
+  pkce: { verifier: string; challenge: string }
+  state: string
+  url: string
+}
 
+export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
+  const pkce = await generatePKCE()
+  const state = randomBytes(16).toString('hex')
+  const authUrl = new URL(AUTHORIZE_URL)
+  authUrl.searchParams.set('client_id', CLIENT_ID)
+  authUrl.searchParams.set('redirect_uri', REDIRECT_URI)
+  authUrl.searchParams.set('response_type', 'code')
+  authUrl.searchParams.set('scope', SCOPES.join(' '))
+  authUrl.searchParams.set('code_challenge', pkce.challenge)
+  authUrl.searchParams.set('code_challenge_method', 'S256')
+  authUrl.searchParams.set('state', state)
+  authUrl.searchParams.set('audience', 'https://api.openai.com/v1')
+  authUrl.searchParams.set('id_token_add_organizations', 'true')
+  authUrl.searchParams.set('codex_cli_simplified_flow', 'true')
+  authUrl.searchParams.set('originator', 'codex_cli_rs')
+
+  return { pkce, state, url: authUrl.toString() }
+}
+
+export async function loginAccount(
+  alias: string,
+  flow?: AuthorizationFlow
+): Promise<AccountCredentials> {
+  const activeFlow = flow ?? await createAuthorizationFlow()
+  const { pkce, state } = activeFlow
+
+  return new Promise((resolve, reject) => {
     let server: http.Server | null = null
 
     const cleanup = () => {
@@ -35,7 +64,7 @@ export async function loginAccount(alias: string): Promise<AccountCredentials> {
     }
 
     server = http.createServer(async (req, res) => {
-      if (!req.url?.startsWith('/callback')) {
+      if (!req.url?.startsWith('/auth/callback')) {
         res.writeHead(404)
         res.end('Not found')
         return
@@ -43,6 +72,7 @@ export async function loginAccount(alias: string): Promise<AccountCredentials> {
 
       const parsedUrl = url.parse(req.url, true)
       const code = parsedUrl.query.code as string
+      const returnedState = parsedUrl.query.state as string | undefined
 
       if (!code) {
         res.writeHead(400)
@@ -51,16 +81,24 @@ export async function loginAccount(alias: string): Promise<AccountCredentials> {
         reject(new Error('No authorization code'))
         return
       }
+      if (returnedState && returnedState !== state) {
+        res.writeHead(400)
+        res.end('Invalid state')
+        cleanup()
+        reject(new Error('Invalid state'))
+        return
+      }
 
       try {
         // Exchange code for tokens
-        const tokenRes = await fetch(`${OPENAI_ISSUER}/oauth/token`, {
+        const tokenRes = await fetch(TOKEN_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
             grant_type: 'authorization_code',
             client_id: CLIENT_ID,
             code,
+            code_verifier: pkce.verifier,
             redirect_uri: REDIRECT_URI
           })
         })
@@ -116,16 +154,9 @@ export async function loginAccount(alias: string): Promise<AccountCredentials> {
     })
 
     server.listen(REDIRECT_PORT, () => {
-      const authUrl = new URL(`${OPENAI_ISSUER}/authorize`)
-      authUrl.searchParams.set('client_id', CLIENT_ID)
-      authUrl.searchParams.set('redirect_uri', REDIRECT_URI)
-      authUrl.searchParams.set('response_type', 'code')
-      authUrl.searchParams.set('scope', SCOPES.join(' '))
-      authUrl.searchParams.set('audience', 'https://api.openai.com/v1')
-
       console.log(`\n[multi-auth] Login for account "${alias}"`)
       console.log(`[multi-auth] Open this URL in your browser:\n`)
-      console.log(`  ${authUrl.toString()}\n`)
+      console.log(`  ${activeFlow.url}\n`)
       console.log(`[multi-auth] Waiting for callback on port ${REDIRECT_PORT}...`)
     })
 
@@ -155,10 +186,10 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
   }
 
   try {
-    const tokenRes = await fetch(`${OPENAI_ISSUER}/oauth/token`, {
+    const tokenRes = await fetch(TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
         grant_type: 'refresh_token',
         client_id: CLIENT_ID,
         refresh_token: account.refreshToken

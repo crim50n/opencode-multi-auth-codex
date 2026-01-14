@@ -1,19 +1,132 @@
 import type { Plugin, PluginInput } from '@opencode-ai/plugin'
-import type { Auth } from '@opencode-ai/sdk'
-import { loginAccount } from './auth.js'
+import { createAuthorizationFlow, loginAccount } from './auth.js'
 import { getNextAccount, markRateLimited } from './rotation.js'
-import { listAccounts, loadStore } from './store.js'
+import { listAccounts } from './store.js'
 import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
 const PROVIDER_ID = 'openai'
-const CODEX_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
+const CODEX_BASE_URL = 'https://chatgpt.com/backend-api'
 const REDIRECT_PORT = 1455
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`
+const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/auth/callback`
+const URL_PATHS = {
+  RESPONSES: '/responses',
+  CODEX_RESPONSES: '/codex/responses'
+}
+const OPENAI_HEADERS = {
+  BETA: 'OpenAI-Beta',
+  ACCOUNT_ID: 'chatgpt-account-id',
+  ORIGINATOR: 'originator',
+  SESSION_ID: 'session_id',
+  CONVERSATION_ID: 'conversation_id'
+}
+const OPENAI_HEADER_VALUES = {
+  BETA_RESPONSES: 'responses=experimental',
+  ORIGINATOR_CODEX: 'codex_cli_rs'
+}
+const JWT_CLAIM_PATH = 'https://api.openai.com/auth'
 
 let pluginConfig: PluginConfig = { ...DEFAULT_CONFIG }
 
-export function configure(config: Partial<PluginConfig>): void {
+function configure(config: Partial<PluginConfig>): void {
   pluginConfig = { ...pluginConfig, ...config }
+}
+
+function decodeJWT(token: string): Record<string, any> | null {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const payload = parts[1]
+    const decoded = Buffer.from(payload, 'base64').toString('utf-8')
+    return JSON.parse(decoded) as Record<string, any>
+  } catch {
+    return null
+  }
+}
+
+function extractRequestUrl(input: Request | string | URL): string {
+  if (typeof input === 'string') return input
+  if (input instanceof URL) return input.toString()
+  return input.url
+}
+
+function rewriteUrlForCodex(url: string): string {
+  return url.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES)
+}
+
+function filterInput(input: unknown): unknown {
+  if (!Array.isArray(input)) return input
+  return input
+    .filter((item) => item?.type !== 'item_reference')
+    .map((item) => {
+      if (item && typeof item === 'object' && 'id' in item) {
+        const { id, ...rest } = item as Record<string, unknown>
+        return rest
+      }
+      return item
+    })
+}
+
+function normalizeModel(model: string | undefined): string {
+  if (!model) return 'gpt-5.1'
+  const modelId = model.includes('/') ? model.split('/').pop()! : model
+  return modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '')
+}
+
+function ensureContentType(headers: Headers): Headers {
+  const responseHeaders = new Headers(headers)
+  if (!responseHeaders.has('content-type')) {
+    responseHeaders.set('content-type', 'text/event-stream; charset=utf-8')
+  }
+  return responseHeaders
+}
+
+function parseSseStream(sseText: string): unknown | null {
+  const lines = sseText.split('\n')
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue
+    try {
+      const data = JSON.parse(line.substring(6)) as { type?: string; response?: unknown }
+      if (data?.type === 'response.done' || data?.type === 'response.completed') {
+        return data.response
+      }
+    } catch {
+      // ignore malformed chunks
+    }
+  }
+  return null
+}
+
+async function convertSseToJson(response: Response, headers: Headers): Promise<Response> {
+  if (!response.body) {
+    throw new Error('[multi-auth] Response has no body')
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let fullText = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    fullText += decoder.decode(value, { stream: true })
+  }
+
+  const finalResponse = parseSseStream(fullText)
+  if (!finalResponse) {
+    return new Response(fullText, {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    })
+  }
+
+  const jsonHeaders = new Headers(headers)
+  jsonHeaders.set('content-type', 'application/json; charset=utf-8')
+
+  return new Response(JSON.stringify(finalResponse), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: jsonHeaders
+  })
 }
 
 /**
@@ -21,7 +134,7 @@ export function configure(config: Partial<PluginConfig>): void {
  *
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
  */
-export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
+const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
   return {
     auth: {
       provider: PROVIDER_ID,
@@ -29,7 +142,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       /**
        * Loader configures the SDK with multi-account rotation
        */
-      async loader(getAuth: () => Promise<Auth>, provider: unknown) {
+      async loader(getAuth, provider) {
         const accounts = listAccounts()
 
         if (accounts.length === 0) {
@@ -52,29 +165,72 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           }
 
           const { account, token } = rotation
-          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+          const decoded = decodeJWT(token)
+          const accountId = decoded?.[JWT_CLAIM_PATH]?.chatgpt_account_id
+          if (!accountId) {
+            return new Response(
+              JSON.stringify({ error: { message: '[multi-auth] Failed to extract accountId from token' } }),
+              { status: 401, headers: { 'Content-Type': 'application/json' } }
+            )
+          }
 
-          // Parse and transform request body
-          const body = init?.body ? JSON.parse(init.body as string) : {}
-          const baseModel = body.model?.replace(/-(?:none|low|medium|high|xhigh)$/, '') || body.model
+          const originalUrl = extractRequestUrl(input)
+          const url = rewriteUrlForCodex(originalUrl)
+
+          let body: Record<string, any> = {}
+          try {
+            body = init?.body ? JSON.parse(init.body as string) : {}
+          } catch {
+            body = {}
+          }
+
+          const isStreaming = body?.stream === true
+          const normalizedModel = normalizeModel(body.model)
           const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/)
-          const reasoningEffort = reasoningMatch?.[1] || body.reasoningEffort || 'medium'
 
-          const payload = {
+          const payload: Record<string, any> = {
             ...body,
-            model: baseModel,
-            reasoning_effort: reasoningEffort,
+            model: normalizedModel,
             store: false
           }
 
+          if (payload.input) {
+            payload.input = filterInput(payload.input)
+          }
+
+          if (reasoningMatch?.[1]) {
+            payload.reasoning = {
+              ...(payload.reasoning || {}),
+              effort: reasoningMatch[1],
+              summary: payload.reasoning?.summary || 'auto'
+            }
+          }
+
+          delete payload.reasoning_effort
+
           try {
+            const headers = new Headers(init?.headers || {})
+            headers.delete('x-api-key')
+            headers.set('Content-Type', 'application/json')
+            headers.set('Authorization', `Bearer ${token}`)
+            headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId)
+            headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES)
+            headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX)
+
+            const cacheKey = payload?.prompt_cache_key
+            if (cacheKey) {
+              headers.set(OPENAI_HEADERS.CONVERSATION_ID, cacheKey)
+              headers.set(OPENAI_HEADERS.SESSION_ID, cacheKey)
+            } else {
+              headers.delete(OPENAI_HEADERS.CONVERSATION_ID)
+              headers.delete(OPENAI_HEADERS.SESSION_ID)
+            }
+
+            headers.set('accept', 'text/event-stream')
+
             const res = await fetch(url, {
               method: init?.method || 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-                ...(init?.headers as Record<string, string>)
-              },
+              headers,
               body: JSON.stringify(payload)
             })
 
@@ -100,6 +256,15 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
               )
             }
 
+            if (!res.ok) {
+              return res
+            }
+
+            const responseHeaders = ensureContentType(res.headers)
+            if (!isStreaming && responseHeaders.get('content-type')?.includes('text/event-stream')) {
+              return await convertSseToJson(res, responseHeaders)
+            }
+
             return res
           } catch (err) {
             return new Response(
@@ -111,8 +276,8 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
         // Return SDK configuration with custom fetch for rotation
         return {
-          apiKey: 'multi-auth', // Placeholder, we use our own tokens
-          baseURL: 'https://api.openai.com/v1',
+          apiKey: 'chatgpt-oauth',
+          baseURL: CODEX_BASE_URL,
           fetch: customFetch
         }
       },
@@ -136,23 +301,16 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
            */
           authorize: async (inputs?: Record<string, string>) => {
             const alias = inputs?.alias || `account-${Date.now()}`
-
-            // Start OAuth server and get URL
-            const authUrl = new URL('https://auth.openai.com/authorize')
-            authUrl.searchParams.set('client_id', 'pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh')
-            authUrl.searchParams.set('redirect_uri', REDIRECT_URI)
-            authUrl.searchParams.set('response_type', 'code')
-            authUrl.searchParams.set('scope', 'openid profile email offline_access')
-            authUrl.searchParams.set('audience', 'https://api.openai.com/v1')
+            const flow = await createAuthorizationFlow()
 
             return {
-              url: authUrl.toString(),
+              url: flow.url,
               method: 'auto' as const,
               instructions: `Login with your ChatGPT Plus/Pro account for "${alias}"`,
 
               callback: async () => {
                 try {
-                  const account = await loginAccount(alias)
+                  const account = await loginAccount(alias, flow)
                   return {
                     type: 'success' as const,
                     provider: PROVIDER_ID,
@@ -176,37 +334,4 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
   }
 }
 
-// CLI helpers (unchanged)
-export function status(): void {
-  const store = loadStore()
-  const accounts = Object.values(store.accounts)
-
-  console.log('\n[multi-auth] Account Status\n')
-  console.log(`Strategy: ${pluginConfig.rotationStrategy}`)
-  console.log(`Accounts: ${accounts.length}`)
-  console.log(`Active: ${store.activeAlias || 'none'}\n`)
-
-  if (accounts.length === 0) {
-    console.log('No accounts configured. Run: opencode-multi-auth add <alias>\n')
-    return
-  }
-
-  for (const acc of accounts) {
-    const isActive = acc.alias === store.activeAlias ? ' (active)' : ''
-    const isRateLimited = acc.rateLimitedUntil && acc.rateLimitedUntil > Date.now()
-      ? ` [RATE LIMITED until ${new Date(acc.rateLimitedUntil).toLocaleTimeString()}]`
-      : ''
-    const expiry = new Date(acc.expiresAt).toLocaleString()
-
-    console.log(`  ${acc.alias}${isActive}${isRateLimited}`)
-    console.log(`    Email: ${acc.email || 'unknown'}`)
-    console.log(`    Uses: ${acc.usageCount}`)
-    console.log(`    Token expires: ${expiry}`)
-    console.log()
-  }
-}
-
-export { loginAccount } from './auth.js'
-export { addAccount, removeAccount, listAccounts } from './store.js'
-export { DEFAULT_CONFIG } from './types.js'
 export default MultiAuthPlugin

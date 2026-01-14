@@ -1,0 +1,10 @@
+import type { AccountStore, AccountCredentials } from './types.js';
+export declare function loadStore(): AccountStore;
+export declare function saveStore(store: AccountStore): void;
+export declare function addAccount(alias: string, creds: Omit<AccountCredentials, 'alias' | 'usageCount'>): AccountStore;
+export declare function removeAccount(alias: string): AccountStore;
+export declare function updateAccount(alias: string, updates: Partial<AccountCredentials>): AccountStore;
+export declare function getActiveAccount(): AccountCredentials | null;
+export declare function listAccounts(): AccountCredentials[];
+export declare function getStorePath(): string;
+//# sourceMappingURL=store.d.ts.map
