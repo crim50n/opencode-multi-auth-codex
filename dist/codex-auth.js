@@ -5,6 +5,7 @@ import { addAccount, loadStore, setActiveAlias, updateAccount } from './store.js
 const CODEX_DIR = path.join(os.homedir(), '.codex');
 const CODEX_AUTH_FILE = path.join(CODEX_DIR, 'auth.json');
 let lastFingerprint = null;
+let lastAuthError = null;
 export function getCodexAuthPath() {
     return CODEX_AUTH_FILE;
 }
@@ -14,6 +15,7 @@ function ensureDir() {
     }
 }
 export function loadCodexAuthFile() {
+    lastAuthError = null;
     if (!fs.existsSync(CODEX_AUTH_FILE))
         return null;
     try {
@@ -21,6 +23,7 @@ export function loadCodexAuthFile() {
         return JSON.parse(raw);
     }
     catch (err) {
+        lastAuthError = 'Failed to parse codex auth.json';
         console.error('[multi-auth] Failed to parse codex auth.json:', err);
         return null;
     }
@@ -136,6 +139,9 @@ export function syncCodexAuthFile() {
     addAccount(newAlias, update);
     setActiveAlias(newAlias);
     return { alias: newAlias, added: true, updated: true };
+}
+export function getCodexAuthStatus() {
+    return { error: lastAuthError };
 }
 export function writeCodexAuthForAlias(alias) {
     const store = loadStore();

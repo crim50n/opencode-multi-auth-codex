@@ -21,6 +21,7 @@ const CODEX_DIR = path.join(os.homedir(), '.codex')
 const CODEX_AUTH_FILE = path.join(CODEX_DIR, 'auth.json')
 
 let lastFingerprint: string | null = null
+let lastAuthError: string | null = null
 
 export function getCodexAuthPath(): string {
   return CODEX_AUTH_FILE
@@ -33,11 +34,13 @@ function ensureDir(): void {
 }
 
 export function loadCodexAuthFile(): CodexAuthFile | null {
+  lastAuthError = null
   if (!fs.existsSync(CODEX_AUTH_FILE)) return null
   try {
     const raw = fs.readFileSync(CODEX_AUTH_FILE, 'utf-8')
     return JSON.parse(raw) as CodexAuthFile
   } catch (err) {
+    lastAuthError = 'Failed to parse codex auth.json'
     console.error('[multi-auth] Failed to parse codex auth.json:', err)
     return null
   }
@@ -159,6 +162,10 @@ export function syncCodexAuthFile(): { alias: string | null; added: boolean; upd
   addAccount(newAlias, update as Omit<AccountCredentials, 'alias' | 'usageCount'>)
   setActiveAlias(newAlias)
   return { alias: newAlias, added: true, updated: true }
+}
+
+export function getCodexAuthStatus(): { error: string | null } {
+  return { error: lastAuthError }
 }
 
 export function writeCodexAuthForAlias(alias: string): void {

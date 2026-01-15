@@ -17,5 +17,8 @@ export declare function syncCodexAuthFile(): {
     added: boolean;
     updated: boolean;
 };
+export declare function getCodexAuthStatus(): {
+    error: string | null;
+};
 export declare function writeCodexAuthForAlias(alias: string): void;
 //# sourceMappingURL=codex-auth.d.ts.map

@@ -8,4 +8,9 @@ export declare function setActiveAlias(alias: string | null): AccountStore;
 export declare function getActiveAccount(): AccountCredentials | null;
 export declare function listAccounts(): AccountCredentials[];
 export declare function getStorePath(): string;
+export declare function getStoreStatus(): {
+    locked: boolean;
+    encrypted: boolean;
+    error: string | null;
+};
 //# sourceMappingURL=store.d.ts.map

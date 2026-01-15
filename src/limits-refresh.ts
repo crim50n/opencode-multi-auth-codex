@@ -1,6 +1,7 @@
 import { mergeRateLimits } from './rate-limits.js'
 import { loadStore, updateAccount } from './store.js'
 import { probeRateLimitsForAccount } from './probe-limits.js'
+import { logError, logInfo } from './logger.js'
 import type { AccountCredentials } from './types.js'
 
 export interface LimitRefreshResult {
@@ -10,8 +11,16 @@ export interface LimitRefreshResult {
 }
 
 export async function refreshRateLimitsForAccount(account: AccountCredentials): Promise<LimitRefreshResult> {
+  updateAccount(account.alias, { limitStatus: 'running', limitError: undefined })
+  logInfo(`Refreshing limits for ${account.alias}`)
   const probe = await probeRateLimitsForAccount(account)
   if (!probe.rateLimits) {
+    logError(`Limit probe failed for ${account.alias}: ${probe.error || 'Probe failed'}`)
+    updateAccount(account.alias, {
+      limitStatus: 'error',
+      limitError: probe.error || 'Probe failed',
+      lastLimitErrorAt: Date.now()
+    })
     return {
       alias: account.alias,
       updated: false,
@@ -20,7 +29,10 @@ export async function refreshRateLimitsForAccount(account: AccountCredentials): 
   }
 
   updateAccount(account.alias, {
-    rateLimits: mergeRateLimits(account.rateLimits, probe.rateLimits)
+    rateLimits: mergeRateLimits(account.rateLimits, probe.rateLimits),
+    limitStatus: 'success',
+    limitError: undefined,
+    lastLimitProbeAt: Date.now()
   })
   return { alias: account.alias, updated: true }
 }

@@ -79,6 +79,9 @@ export async function loginAccount(alias, flow) {
                     throw new Error(`Token exchange failed: ${tokenRes.status}`);
                 }
                 const tokens = (await tokenRes.json());
+                if (!tokens.refresh_token) {
+                    throw new Error('Token exchange did not return a refresh_token');
+                }
                 const expiresAt = Date.now() + tokens.expires_in * 1000;
                 let email;
                 try {
@@ -165,11 +168,16 @@ export async function refreshToken(alias) {
         }
         const tokens = (await tokenRes.json());
         const expiresAt = Date.now() + tokens.expires_in * 1000;
-        const updatedStore = updateAccount(alias, {
+        const updates = {
             accessToken: tokens.access_token,
             refreshToken: tokens.refresh_token || account.refreshToken,
-            expiresAt
-        });
+            expiresAt,
+            lastRefresh: new Date().toISOString()
+        };
+        if (tokens.id_token) {
+            updates.idToken = tokens.id_token;
+        }
+        const updatedStore = updateAccount(alias, updates);
         return updatedStore.accounts[alias];
     }
     catch (err) {

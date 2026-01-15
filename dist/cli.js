@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { fileURLToPath } from 'node:url';
 import { loginAccount } from './auth.js';
 import { removeAccount, listAccounts, getStorePath, loadStore } from './store.js';
 import { startWebConsole } from './web.js';
+import { disableService, installService, serviceStatus } from './systemd.js';
 const args = process.argv.slice(2);
 const command = args[0];
 const alias = args[1];
@@ -97,6 +99,29 @@ async function main() {
             startWebConsole({ port, host: hostArg });
             break;
         }
+        case 'service': {
+            const action = args[1] || 'status';
+            const portArg = getFlagValue('--port');
+            const hostArg = getFlagValue('--host');
+            const port = portArg ? Number(portArg) : undefined;
+            if (portArg && Number.isNaN(port)) {
+                console.error('Invalid --port value');
+                process.exit(1);
+            }
+            const cliPath = fileURLToPath(import.meta.url);
+            if (action === 'install') {
+                const file = installService({ cliPath, host: hostArg, port });
+                console.log(`Installed systemd user service at ${file}`);
+                break;
+            }
+            if (action === 'disable') {
+                disableService();
+                console.log('Disabled codex-soft systemd user service.');
+                break;
+            }
+            serviceStatus();
+            break;
+        }
         case 'help':
         case '--help':
         case '-h':
@@ -111,6 +136,7 @@ Commands:
   status           Show detailed account status
   path             Show config file location
   web              Launch local Codex auth.json dashboard (use --port/--host)
+  service          Install/disable systemd user service (install|disable|status)
   help             Show this help message
 
 Examples:
@@ -119,6 +145,7 @@ Examples:
   opencode-multi-auth add backup
   opencode-multi-auth status
   opencode-multi-auth web --port 3434 --host 127.0.0.1
+  opencode-multi-auth service install --port 3434 --host 127.0.0.1
 
 After adding accounts, the plugin auto-rotates between them.
 `);
