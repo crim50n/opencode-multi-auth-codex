@@ -71,6 +71,39 @@ export function updateAccount(alias: string, updates: Partial<AccountCredentials
   return store
 }
 
+export function setActiveAlias(alias: string | null): AccountStore {
+  const store = loadStore()
+  const now = Date.now()
+  const previousAlias = store.activeAlias
+
+  if (alias === null) {
+    store.activeAlias = null
+  } else if (store.accounts[alias]) {
+    if (previousAlias && previousAlias !== alias && store.accounts[previousAlias]) {
+      store.accounts[previousAlias] = {
+        ...store.accounts[previousAlias],
+        lastActiveUntil: now
+      }
+    }
+
+    store.activeAlias = alias
+    store.accounts[alias] = {
+      ...store.accounts[alias],
+      lastSeenAt: now,
+      lastActiveUntil: undefined
+    }
+
+    const aliases = Object.keys(store.accounts)
+    const idx = aliases.indexOf(alias)
+    if (idx >= 0) {
+      store.rotationIndex = idx
+    }
+    store.lastRotation = now
+  }
+  saveStore(store)
+  return store
+}
+
 export function getActiveAccount(): AccountCredentials | null {
   const store = loadStore()
   if (!store.activeAlias) return null

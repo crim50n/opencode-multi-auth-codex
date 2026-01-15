@@ -2,10 +2,17 @@
 
 import { loginAccount } from './auth.js'
 import { removeAccount, listAccounts, getStorePath, loadStore } from './store.js'
+import { startWebConsole } from './web.js'
 
 const args = process.argv.slice(2)
 const command = args[0]
 const alias = args[1]
+
+function getFlagValue(flag: string): string | undefined {
+  const idx = args.indexOf(flag)
+  if (idx === -1) return undefined
+  return args[idx + 1]
+}
 
 async function main(): Promise<void> {
   switch (command) {
@@ -89,6 +96,18 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'web': {
+      const portArg = getFlagValue('--port')
+      const hostArg = getFlagValue('--host')
+      const port = portArg ? Number(portArg) : undefined
+      if (portArg && Number.isNaN(port)) {
+        console.error('Invalid --port value')
+        process.exit(1)
+      }
+      startWebConsole({ port, host: hostArg })
+      break
+    }
+
     case 'help':
     case '--help':
     case '-h':
@@ -102,6 +121,7 @@ Commands:
   list             List all configured accounts
   status           Show detailed account status
   path             Show config file location
+  web              Launch local Codex auth.json dashboard (use --port/--host)
   help             Show this help message
 
 Examples:
@@ -109,6 +129,7 @@ Examples:
   opencode-multi-auth add work
   opencode-multi-auth add backup
   opencode-multi-auth status
+  opencode-multi-auth web --port 3434 --host 127.0.0.1
 
 After adding accounts, the plugin auto-rotates between them.
 `)

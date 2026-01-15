@@ -1,6 +1,8 @@
+import { syncAuthFromOpenCode } from './auth-sync.js';
 import { createAuthorizationFlow, loginAccount } from './auth.js';
+import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js';
 import { getNextAccount, markRateLimited } from './rotation.js';
-import { listAccounts } from './store.js';
+import { listAccounts, updateAccount } from './store.js';
 import { DEFAULT_CONFIG } from './types.js';
 const PROVIDER_ID = 'openai';
 const CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
@@ -134,6 +136,7 @@ const MultiAuthPlugin = async ({ client }) => {
              * Loader configures the SDK with multi-account rotation
              */
             async loader(getAuth, provider) {
+                await syncAuthFromOpenCode(getAuth);
                 const accounts = listAccounts();
                 if (accounts.length === 0) {
                     console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>');
@@ -141,6 +144,7 @@ const MultiAuthPlugin = async ({ client }) => {
                 }
                 // Custom fetch with multi-account rotation
                 const customFetch = async (input, init) => {
+                    await syncAuthFromOpenCode(getAuth);
                     const rotation = await getNextAccount(pluginConfig);
                     if (!rotation) {
                         return new Response(JSON.stringify({ error: { message: 'No available accounts' } }), { status: 503, headers: { 'Content-Type': 'application/json' } });
@@ -202,6 +206,12 @@ const MultiAuthPlugin = async ({ client }) => {
                             headers,
                             body: JSON.stringify(payload)
                         });
+                        const limitUpdate = extractRateLimitUpdate(res.headers);
+                        if (limitUpdate) {
+                            updateAccount(account.alias, {
+                                rateLimits: mergeRateLimits(account.rateLimits, limitUpdate)
+                            });
+                        }
                         // Handle rate limiting with automatic rotation
                         if (res.status === 429) {
                             markRateLimited(account.alias, pluginConfig.rateLimitCooldownMs);

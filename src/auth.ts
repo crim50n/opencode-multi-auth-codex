@@ -127,7 +127,8 @@ export async function loginAccount(
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           expiresAt,
-          email
+          email,
+          source: 'opencode'
         })
 
         const account = store.accounts[alias]

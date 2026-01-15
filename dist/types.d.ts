@@ -2,11 +2,28 @@ export interface AccountCredentials {
     alias: string;
     accessToken: string;
     refreshToken: string;
+    idToken?: string;
+    accountId?: string;
     expiresAt: number;
     email?: string;
+    lastRefresh?: string;
+    lastSeenAt?: number;
+    lastActiveUntil?: number;
     lastUsed?: number;
     usageCount: number;
     rateLimitedUntil?: number;
+    rateLimits?: AccountRateLimits;
+    source?: 'opencode' | 'codex';
+}
+export interface RateLimitWindow {
+    limit?: number;
+    remaining?: number;
+    resetAt?: number;
+    updatedAt?: number;
+}
+export interface AccountRateLimits {
+    fiveHour?: RateLimitWindow;
+    weekly?: RateLimitWindow;
 }
 export interface AccountStore {
     accounts: Record<string, AccountCredentials>;

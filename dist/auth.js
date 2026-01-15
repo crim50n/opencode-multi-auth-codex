@@ -97,7 +97,8 @@ export async function loginAccount(alias, flow) {
                     accessToken: tokens.access_token,
                     refreshToken: tokens.refresh_token,
                     expiresAt,
-                    email
+                    email,
+                    source: 'opencode'
                 });
                 const account = store.accounts[alias];
                 res.writeHead(200, { 'Content-Type': 'text/html' });

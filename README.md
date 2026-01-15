@@ -99,6 +99,31 @@ Active: personal
     Token expires: 12/25/2025, 3:00:00 PM
 ```
 
+## Web Dashboard (Local Only)
+
+Launch the local dashboard:
+
+```bash
+opencode-multi-auth web --port 3434 --host 127.0.0.1
+```
+
+Or from the repo:
+
+```bash
+npm run web
+```
+
+Open `http://127.0.0.1:3434` to manage Codex CLI tokens from `~/.codex/auth.json`:
+- Sync current auth.json token into your local list
+- See which token is active on the device
+- Switch auth.json to a stored token
+- Refresh 5-hour and weekly limits manually (probe-run per alias)
+
+The dashboard watches `~/.codex/auth.json` and will add new tokens as you log in via Codex CLI.
+
+Limit refresh runs `codex exec` in a per-alias sandbox (`~/.codex-multi/<alias>`) so you can
+update limits for any stored token without switching the active device token.
+
 ## Configure OpenCode
 
 Add to your `~/.config/opencode/opencode.json`:
