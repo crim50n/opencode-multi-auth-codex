@@ -1,5 +1,5 @@
 {
-  "name": "@a3fckx/opencode-multi-auth",
+  "name": "@guard22/opencode-multi-auth-codex",
   "version": "1.0.4",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
@@ -29,7 +29,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/a3fckx/opencode-multi-auth"
+    "url": "https://github.com/guard22/opencode-multi-auth-codex"
   },
   "keywords": [
     "opencode",

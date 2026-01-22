@@ -1,8 +1,6 @@
-# opencode-multi-auth
+# opencode-multi-auth-codex
 
 Multi-account OAuth rotation for OpenAI Codex. Auto-rotates between your ChatGPT Plus/Pro accounts.
-
-[![npm version](https://img.shields.io/npm/v/@a3fckx/opencode-multi-auth.svg)](https://www.npmjs.com/package/@a3fckx/opencode-multi-auth)
 
 > **Based on [opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth) by [@nummanali](https://x.com/nummanali)**. Forked and modified to add multi-account rotation support.
 
@@ -16,25 +14,25 @@ This fork patches the plugin to talk to **ChatGPT Codex backend** (`chatgpt.com/
 bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
 ```
 
-Then keep the plugin entry as-is in `~/.config/opencode/opencode.json`:
+Then set the plugin entry in `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["@a3fckx/opencode-multi-auth"]
+  "plugin": ["github:guard22/opencode-multi-auth-codex"]
 }
 ```
 
-If you already installed the npm version, re-run the GitHub install command above to override it.
+If you already installed an older build, re-run the GitHub install command above to override it.
 
 ## Installation
 
-### Via npm (Recommended)
+### Via GitHub (Recommended)
 
 Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["@a3fckx/opencode-multi-auth"]
+  "plugin": ["github:guard22/opencode-multi-auth-codex"]
 }
 ```
 
@@ -45,14 +43,14 @@ OpenCode will auto-install on first run.
 If auto-install fails, install manually:
 
 ```bash
-bun add @a3fckx/opencode-multi-auth --cwd ~/.config/opencode
+bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/a3fckx/opencode-multi-auth.git
-cd opencode-multi-auth
+git clone https://github.com/guard22/opencode-multi-auth-codex.git
+cd opencode-multi-auth-codex
 bun install
 bun run build
 bun link
@@ -105,7 +103,7 @@ Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["@a3fckx/opencode-multi-auth"]
+  "plugin": ["github:guard22/opencode-multi-auth-codex"]
 }
 ```
 
@@ -115,7 +113,7 @@ Or with other plugins:
 {
   "plugin": [
     "oh-my-opencode",
-    "@a3fckx/opencode-multi-auth"
+    "github:guard22/opencode-multi-auth-codex"
   ]
 }
 ```
