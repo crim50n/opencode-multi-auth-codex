@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { URL } from 'node:url';
 import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js';
 import { getCodexAuthPath, getCodexAuthStatus, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js';
@@ -10,6 +12,7 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 3434;
 const SYNC_INTERVAL_MS = 3000;
 const SYNC_DEBOUNCE_MS = 600;
+const ANTIGRAVITY_ACCOUNTS_FILE = path.join(os.homedir(), '.config', 'opencode', 'antigravity-accounts.json');
 let lastSyncAt = 0;
 let lastSyncError = null;
 let syncTimer = null;
@@ -353,6 +356,41 @@ const HTML = `<!doctype html>
         overflow: auto;
         white-space: pre-wrap;
       }
+      .ag-grid {
+        display: grid;
+        gap: 12px;
+      }
+      .ag-card {
+        background: var(--panel-2);
+        border-radius: 14px;
+        padding: 12px 14px;
+        display: grid;
+        gap: 6px;
+      }
+      .ag-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 13px;
+      }
+      .ag-label {
+        color: var(--muted);
+      }
+      .ag-badge {
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        background: rgba(255,255,255,0.08);
+        color: var(--muted);
+      }
+      .ag-badge.active {
+        background: rgba(55, 211, 153, 0.15);
+        color: var(--success);
+      }
+      .ag-badge.missing {
+        background: rgba(255, 107, 107, 0.18);
+        color: var(--danger);
+      }
       @media (max-width: 720px) {
         header { padding: 26px 18px 10px; }
         .container { padding: 0 16px 28px; }
@@ -404,6 +442,18 @@ const HTML = `<!doctype html>
       <section class="panel">
         <div class="logs-header">
           <div>
+            <div style="font-size: 16px; font-weight: 600;">Antigravity accounts</div>
+            <div class="notice" id="antigravityPath"></div>
+          </div>
+          <button class="secondary" id="copyAgLogin">Copy reauth command</button>
+        </div>
+        <div class="notice" id="antigravityNotice"></div>
+        <div class="ag-grid" id="antigravityAccounts"></div>
+        <div class="notice">Reauth: <code>opencode auth login</code> · Optional reset: remove the antigravity accounts file, then login again.</div>
+      </section>
+      <section class="panel">
+        <div class="logs-header">
+          <div>
             <div style="font-size: 16px; font-weight: 600;">Logs</div>
             <div class="notice" id="logPath"></div>
           </div>
@@ -433,6 +483,10 @@ const HTML = `<!doctype html>
       const logPathEl = document.getElementById('logPath')
       const addAliasInput = document.getElementById('addAliasInput')
       const addAccountBtn = document.getElementById('addAccountBtn')
+      const agPathEl = document.getElementById('antigravityPath')
+      const agNoticeEl = document.getElementById('antigravityNotice')
+      const agAccountsEl = document.getElementById('antigravityAccounts')
+      const copyAgLoginBtn = document.getElementById('copyAgLogin')
 
       let latestState = null
       let pollTimer = null
@@ -767,6 +821,38 @@ const HTML = `<!doctype html>
         }
       }
 
+      function renderAntigravity(state) {
+        const ag = state.antigravity || {}
+        if (agPathEl) {
+          agPathEl.textContent = ag.path ? 'Path: ' + ag.path : ''
+        }
+        if (agNoticeEl) {
+          agNoticeEl.textContent = ag.error || ''
+        }
+        if (!agAccountsEl) return
+        const accounts = Array.isArray(ag.accounts) ? ag.accounts : []
+        if (accounts.length === 0) {
+          agAccountsEl.innerHTML = '<div class="notice">No Antigravity accounts found.</div>'
+          return
+        }
+        agAccountsEl.innerHTML = accounts.map((acc) => {
+          const active = acc.index === ag.activeIndex
+          const activeBadge = active ? '<span class="ag-badge active">Active</span>' : '<span class="ag-badge">Stored</span>'
+          const tokenBadge = acc.hasRefreshToken ? '<span class="ag-badge">token</span>' : '<span class="ag-badge missing">missing token</span>'
+          return '' +
+            '<div class="ag-card">' +
+              '<div class="ag-row">' +
+                '<strong>' + escapeHtml(acc.alias || ('#' + acc.index)) + '</strong>' +
+                '<div style="display:flex; gap:6px;">' + activeBadge + tokenBadge + '</div>' +
+              '</div>' +
+              '<div class="ag-row"><span class="ag-label">Project</span><span>' + escapeHtml(acc.projectId || 'unknown') + '</span></div>' +
+              '<div class="ag-row"><span class="ag-label">Managed</span><span>' + escapeHtml(acc.managedProjectId || '—') + '</span></div>' +
+              '<div class="ag-row"><span class="ag-label">Added</span><span>' + (acc.addedAt ? formatDate(acc.addedAt) : 'unknown') + '</span></div>' +
+              '<div class="ag-row"><span class="ag-label">Last used</span><span>' + (acc.lastUsed ? formatDate(acc.lastUsed) : 'never') + '</span></div>' +
+            '</div>'
+        }).join('')
+      }
+
       function updatePolling(queue) {
         if (queue?.running && !pollTimer) {
           pollTimer = setInterval(() => refreshState(), 2000)
@@ -790,6 +876,7 @@ const HTML = `<!doctype html>
         renderQueue(state)
         renderAccounts(state)
         renderLogin(state)
+        renderAntigravity(state)
         updatePolling(state.queue)
       }
 
@@ -880,6 +967,17 @@ const HTML = `<!doctype html>
         await refreshLogs()
         showToast('Logs refreshed')
       })
+
+      if (copyAgLoginBtn) {
+        copyAgLoginBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText('opencode auth login')
+            showToast('Command copied')
+          } catch {
+            showToast('Copy failed')
+          }
+        })
+      }
 
       if (addAccountBtn && addAliasInput) {
         const startLogin = async () => {
@@ -1013,6 +1111,30 @@ function runSync() {
         logError(`Sync failed: ${lastSyncError}`);
     }
 }
+function loadAntigravityAccounts() {
+    const result = { path: ANTIGRAVITY_ACCOUNTS_FILE, accounts: [] };
+    if (!fs.existsSync(ANTIGRAVITY_ACCOUNTS_FILE)) {
+        return { ...result, error: 'antigravity-accounts.json not found' };
+    }
+    try {
+        const raw = JSON.parse(fs.readFileSync(ANTIGRAVITY_ACCOUNTS_FILE, 'utf-8'));
+        const activeIndex = typeof raw?.activeIndex === 'number' ? raw.activeIndex : undefined;
+        const accounts = Array.isArray(raw?.accounts) ? raw.accounts : [];
+        const view = accounts.map((acc, index) => ({
+            index,
+            alias: acc?.projectId || acc?.managedProjectId,
+            projectId: acc?.projectId,
+            managedProjectId: acc?.managedProjectId,
+            addedAt: acc?.addedAt,
+            lastUsed: acc?.lastUsed,
+            hasRefreshToken: Boolean(acc?.refreshToken)
+        }));
+        return { ...result, activeIndex, accounts: view };
+    }
+    catch (err) {
+        return { ...result, error: `Failed to parse antigravity accounts: ${err}` };
+    }
+}
 function scheduleSync() {
     if (syncTimer) {
         clearTimeout(syncTimer);
@@ -1055,6 +1177,7 @@ export function startWebConsole(options) {
                 storeStatus,
                 login: pendingLogin,
                 lastLoginError,
+                antigravity: loadAntigravityAccounts(),
                 queue: getRefreshQueueState(),
                 recommendedAlias: recommendAlias(rawAccounts),
                 logPath: getLogPath()
