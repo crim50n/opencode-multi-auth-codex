@@ -177,6 +177,7 @@ Optional fallback: use a file path plugin entry if installs are blocked:
 | `remove <alias>` | Remove an account |
 | `list` | List all configured accounts |
 | `status` | Detailed status with usage counts |
+| `panel` | Local web panel with account status |
 | `path` | Show config file location |
 | `help` | Show help message |
 
