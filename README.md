@@ -118,6 +118,47 @@ Or with other plugins:
 }
 ```
 
+## Troubleshooting
+
+### BunInstallFailedError (DependencyLoop)
+
+If OpenCode fails to boot with:
+
+```
+BunInstallFailedError
+{ "pkg": "github:guard22/opencode-multi-auth-codex", "version": "latest" }
+```
+
+It usually means an older `@a3fckx/opencode-multi-auth` dependency is still present.
+
+Fix:
+
+1) Remove the old dependency from `~/.config/opencode/package.json`:
+
+```json
+{
+  "dependencies": {
+    "@a3fckx/opencode-multi-auth": "^1.0.4"
+  }
+}
+```
+
+2) Reinstall:
+
+```bash
+bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
+```
+
+Optional fallback: use a file path plugin entry if installs are blocked:
+
+```json
+{
+  "plugin": [
+    "file:///Users/<you>/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/index.js"
+  ]
+}
+```
+
 ## How It Works
 
 | Feature | Behavior |
