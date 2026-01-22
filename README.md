@@ -97,6 +97,68 @@ Active: personal
     Token expires: 12/25/2025, 3:00:00 PM
 ```
 
+## Web Dashboard (Local Only)
+
+Launch the local dashboard:
+
+```bash
+opencode-multi-auth web --port 3434 --host 127.0.0.1
+```
+
+Or from the repo:
+
+```bash
+npm run web
+```
+
+Open `http://127.0.0.1:3434` to manage Codex CLI tokens from `~/.codex/auth.json`:
+- Sync current auth.json token into your local list
+- See which token is active on the device
+- Switch auth.json to a stored token
+- Refresh OAuth tokens (per-token or all)
+- Refresh 5-hour and weekly limits manually (probe-run per alias)
+- Search/filter by alias/email/tags/notes
+- Sort by remaining limits, expiry, or alias; recommended token badge
+- Tag and annotate tokens (notes)
+- Queue-based refresh with progress + stop
+- Limit history sparklines and trend rate
+- Built-in log view
+
+The dashboard watches `~/.codex/auth.json` and will add new tokens as you log in via Codex CLI.
+
+Limit refresh runs `codex exec` in a per-alias sandbox (`~/.codex-multi/<alias>`) so you can
+update limits for any stored token without switching the active device token.
+
+### Optional Store Encryption
+
+Set `CODEX_SOFT_STORE_PASSPHRASE` to encrypt `~/.config/opencode-multi-auth/accounts.json` at rest:
+
+```bash
+export CODEX_SOFT_STORE_PASSPHRASE="your-passphrase"
+```
+
+If the store is encrypted and the passphrase is missing, the UI will show a locked status and refuse to overwrite.
+
+### Systemd Autostart (user service)
+
+Install and enable the user service:
+
+```bash
+opencode-multi-auth service install --port 3434 --host 127.0.0.1
+```
+
+Check status or disable:
+
+```bash
+opencode-multi-auth service status
+opencode-multi-auth service disable
+```
+
+### Logs
+
+The dashboard writes logs to `~/.config/opencode-multi-auth/logs/codex-soft.log` by default.
+Override with `CODEX_SOFT_LOG_PATH` if you want a custom path.
+
 ## Configure OpenCode
 
 Add to your `~/.config/opencode/opencode.json`:
@@ -178,6 +240,8 @@ Optional fallback: use a file path plugin entry if installs are blocked:
 | `list` | List all configured accounts |
 | `status` | Detailed status with usage counts |
 | `path` | Show config file location |
+| `web` | Launch local Codex auth.json dashboard |
+| `service` | Install/disable systemd user service |
 | `help` | Show help message |
 
 ## Requirements

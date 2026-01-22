@@ -1,7 +1,9 @@
 import type { Plugin, PluginInput } from '@opencode-ai/plugin'
+import { syncAuthFromOpenCode } from './auth-sync.js'
 import { createAuthorizationFlow, loginAccount } from './auth.js'
+import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
 import { getNextAccount, markRateLimited } from './rotation.js'
-import { listAccounts } from './store.js'
+import { listAccounts, updateAccount } from './store.js'
 import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
 const PROVIDER_ID = 'openai'
@@ -143,6 +145,7 @@ const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
        * Loader configures the SDK with multi-account rotation
        */
       async loader(getAuth, provider) {
+        await syncAuthFromOpenCode(getAuth)
         const accounts = listAccounts()
 
         if (accounts.length === 0) {
@@ -155,6 +158,7 @@ const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           input: Request | string | URL,
           init?: RequestInit
         ): Promise<Response> => {
+          await syncAuthFromOpenCode(getAuth)
           const rotation = await getNextAccount(pluginConfig)
 
           if (!rotation) {
@@ -233,6 +237,13 @@ const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
               headers,
               body: JSON.stringify(payload)
             })
+
+            const limitUpdate = extractRateLimitUpdate(res.headers)
+            if (limitUpdate) {
+              updateAccount(account.alias, {
+                rateLimits: mergeRateLimits(account.rateLimits, limitUpdate)
+              })
+            }
 
             // Handle rate limiting with automatic rotation
             if (res.status === 429) {

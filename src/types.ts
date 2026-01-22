@@ -3,12 +3,52 @@ export interface AccountCredentials {
   alias: string
   accessToken: string
   refreshToken: string
+  idToken?: string
+  accountId?: string
   expiresAt: number // Unix timestamp
   email?: string
+  lastRefresh?: string
+  lastSeenAt?: number
+  lastActiveUntil?: number
   lastUsed?: number
   usageCount: number
   rateLimitedUntil?: number // If hit rate limit, when it resets
+  rateLimits?: AccountRateLimits
+  rateLimitHistory?: RateLimitHistoryEntry[]
+  limitStatus?: LimitStatus
+  limitError?: string
+  lastLimitProbeAt?: number
+  lastLimitErrorAt?: number
+  tags?: string[]
+  notes?: string
+  source?: 'opencode' | 'codex'
 }
+
+export interface RateLimitWindow {
+  limit?: number
+  remaining?: number
+  resetAt?: number
+  updatedAt?: number
+}
+
+export interface AccountRateLimits {
+  fiveHour?: RateLimitWindow
+  weekly?: RateLimitWindow
+}
+
+export interface RateLimitSnapshot {
+  remaining?: number
+  limit?: number
+  resetAt?: number
+}
+
+export interface RateLimitHistoryEntry {
+  at: number
+  fiveHour?: RateLimitSnapshot
+  weekly?: RateLimitSnapshot
+}
+
+export type LimitStatus = 'idle' | 'queued' | 'running' | 'success' | 'error' | 'stopped'
 
 // Local store for all accounts
 export interface AccountStore {

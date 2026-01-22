@@ -16,7 +16,8 @@ const SCOPES = ['openid', 'profile', 'email', 'offline_access']
 
 interface TokenResponse {
   access_token: string
-  refresh_token: string
+  refresh_token?: string
+  id_token?: string
   expires_in: number
   token_type: string
 }
@@ -108,6 +109,9 @@ export async function loginAccount(
         }
 
         const tokens = (await tokenRes.json()) as TokenResponse
+        if (!tokens.refresh_token) {
+          throw new Error('Token exchange did not return a refresh_token')
+        }
         const expiresAt = Date.now() + tokens.expires_in * 1000
 
         let email: string | undefined
@@ -127,7 +131,8 @@ export async function loginAccount(
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           expiresAt,
-          email
+          email,
+          source: 'opencode'
         })
 
         const account = store.accounts[alias]
@@ -204,11 +209,17 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
     const tokens = (await tokenRes.json()) as TokenResponse
     const expiresAt = Date.now() + tokens.expires_in * 1000
 
-    const updatedStore = updateAccount(alias, {
+    const updates: Partial<AccountCredentials> = {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token || account.refreshToken,
-      expiresAt
-    })
+      expiresAt,
+      lastRefresh: new Date().toISOString()
+    }
+    if (tokens.id_token) {
+      updates.idToken = tokens.id_token
+    }
+
+    const updatedStore = updateAccount(alias, updates)
 
     return updatedStore.accounts[alias]
   } catch (err) {

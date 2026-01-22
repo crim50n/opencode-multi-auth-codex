@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "web": "node ./dist/cli.js web --port 3434 --host 127.0.0.1"
   },
   "dependencies": {
     "@openauthjs/openauth": "^0.4.3"
