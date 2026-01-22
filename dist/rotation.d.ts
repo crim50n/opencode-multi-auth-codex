@@ -6,4 +6,6 @@ export interface RotationResult {
 export declare function getNextAccount(config: typeof DEFAULT_CONFIG): Promise<RotationResult | null>;
 export declare function markRateLimited(alias: string, cooldownMs: number): void;
 export declare function clearRateLimit(alias: string): void;
+export declare function markAuthInvalid(alias: string): void;
+export declare function clearAuthInvalid(alias: string): void;
 //# sourceMappingURL=rotation.d.ts.map

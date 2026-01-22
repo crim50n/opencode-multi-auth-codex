@@ -13,6 +13,8 @@ export interface AccountCredentials {
   lastUsed?: number
   usageCount: number
   rateLimitedUntil?: number // If hit rate limit, when it resets
+  authInvalid?: boolean
+  authInvalidatedAt?: number
   rateLimits?: AccountRateLimits
   rateLimitHistory?: RateLimitHistoryEntry[]
   limitStatus?: LimitStatus

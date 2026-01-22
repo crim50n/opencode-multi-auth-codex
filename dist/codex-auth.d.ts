@@ -12,6 +12,10 @@ export interface CodexAuthFile {
 export declare function getCodexAuthPath(): string;
 export declare function loadCodexAuthFile(): CodexAuthFile | null;
 export declare function writeCodexAuthFile(auth: CodexAuthFile): void;
+export declare function decodeJwtPayload(token: string): Record<string, any> | null;
+export declare function getEmailFromClaims(claims: Record<string, any> | null): string | undefined;
+export declare function getAccountIdFromClaims(claims: Record<string, any> | null): string | undefined;
+export declare function getExpiryFromClaims(claims: Record<string, any> | null): number | undefined;
 export declare function syncCodexAuthFile(): {
     alias: string | null;
     added: boolean;

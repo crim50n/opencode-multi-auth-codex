@@ -3,6 +3,13 @@ import { randomBytes } from 'node:crypto'
 import * as http from 'http'
 import * as url from 'url'
 import { addAccount, updateAccount, loadStore } from './store.js'
+import { clearAuthInvalid } from './rotation.js'
+import {
+  decodeJwtPayload,
+  getAccountIdFromClaims,
+  getEmailFromClaims,
+  getExpiryFromClaims
+} from './codex-auth.js'
 import type { AccountCredentials } from './types.js'
 
 // OpenAI OAuth endpoints (same as official Codex CLI)
@@ -112,27 +119,40 @@ export async function loginAccount(
         if (!tokens.refresh_token) {
           throw new Error('Token exchange did not return a refresh_token')
         }
-        const expiresAt = Date.now() + tokens.expires_in * 1000
+        const now = Date.now()
+        const accessClaims = decodeJwtPayload(tokens.access_token)
+        const idClaims = tokens.id_token ? decodeJwtPayload(tokens.id_token) : null
+        const expiresAt = getExpiryFromClaims(accessClaims) || getExpiryFromClaims(idClaims) || now + tokens.expires_in * 1000
 
-        let email: string | undefined
+        let email: string | undefined = getEmailFromClaims(idClaims) || getEmailFromClaims(accessClaims)
         try {
           const userRes = await fetch(`${OPENAI_ISSUER}/userinfo`, {
             headers: { Authorization: `Bearer ${tokens.access_token}` }
           })
           if (userRes.ok) {
             const user = (await userRes.json()) as { email?: string }
-            email = user.email
+            email = user.email || email
           }
         } catch {
           /* user info fetch is non-critical */
         }
 
+        const accountId =
+          getAccountIdFromClaims(idClaims) ||
+          getAccountIdFromClaims(accessClaims)
+
         const store = addAccount(alias, {
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
+          idToken: tokens.id_token,
+          accountId,
           expiresAt,
           email,
-          source: 'opencode'
+          lastRefresh: new Date(now).toISOString(),
+          lastSeenAt: now,
+          source: 'opencode',
+          authInvalid: false,
+          authInvalidatedAt: undefined
         })
 
         const account = store.accounts[alias]
@@ -207,19 +227,24 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
     }
 
     const tokens = (await tokenRes.json()) as TokenResponse
-    const expiresAt = Date.now() + tokens.expires_in * 1000
+    const accessClaims = decodeJwtPayload(tokens.access_token)
+    const idClaims = tokens.id_token ? decodeJwtPayload(tokens.id_token) : null
+    const expiresAt = getExpiryFromClaims(accessClaims) || getExpiryFromClaims(idClaims) || Date.now() + tokens.expires_in * 1000
 
     const updates: Partial<AccountCredentials> = {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token || account.refreshToken,
       expiresAt,
-      lastRefresh: new Date().toISOString()
-    }
-    if (tokens.id_token) {
-      updates.idToken = tokens.id_token
+      lastRefresh: new Date().toISOString(),
+      idToken: tokens.id_token || account.idToken,
+      accountId:
+        getAccountIdFromClaims(idClaims) ||
+        getAccountIdFromClaims(accessClaims) ||
+        account.accountId
     }
 
     const updatedStore = updateAccount(alias, updates)
+    clearAuthInvalid(alias)
 
     return updatedStore.accounts[alias]
   } catch (err) {

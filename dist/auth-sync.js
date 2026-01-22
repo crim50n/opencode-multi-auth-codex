@@ -1,4 +1,5 @@
 import { addAccount, loadStore, updateAccount } from './store.js';
+import { decodeJwtPayload, getAccountIdFromClaims, getEmailFromClaims } from './codex-auth.js';
 const OPENAI_ISSUER = 'https://auth.openai.com';
 const AUTH_SYNC_COOLDOWN_MS = 10_000;
 let lastSyncedAccess = null;
@@ -64,16 +65,21 @@ export async function syncAuthFromOpenCode(getAuth) {
         return;
     lastSyncedAccess = auth.access;
     const existingAlias = findAccountAliasByToken(auth.access, auth.refresh);
+    const accessClaims = decodeJwtPayload(auth.access);
+    const derivedEmail = getEmailFromClaims(accessClaims);
+    const derivedAccountId = getAccountIdFromClaims(accessClaims);
     if (existingAlias) {
         updateAccount(existingAlias, {
             accessToken: auth.access,
             refreshToken: auth.refresh,
-            expiresAt: auth.expires
+            expiresAt: auth.expires,
+            email: derivedEmail,
+            accountId: derivedAccountId
         });
         return;
     }
     const store = loadStore();
-    const email = await fetchEmail(auth.access);
+    const email = (await fetchEmail(auth.access)) || derivedEmail;
     if (email) {
         const existingByEmail = findAccountAliasByEmail(email, store);
         if (existingByEmail) {
@@ -92,6 +98,7 @@ export async function syncAuthFromOpenCode(getAuth) {
         refreshToken: auth.refresh,
         expiresAt: auth.expires,
         email,
+        accountId: derivedAccountId,
         source: 'opencode'
     });
 }

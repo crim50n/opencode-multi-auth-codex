@@ -19,12 +19,14 @@ export async function getNextAccount(config: typeof DEFAULT_CONFIG): Promise<Rot
   const now = Date.now()
   const availableAliases = aliases.filter(alias => {
     const acc = store.accounts[alias]
-    return !acc.rateLimitedUntil || acc.rateLimitedUntil < now
+    const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now
+    const notInvalidated = !acc.authInvalid
+    return notRateLimited && notInvalidated
   })
 
   if (availableAliases.length === 0) {
-    console.warn('[multi-auth] All accounts rate-limited. Using first available.')
-    availableAliases.push(aliases[0])
+    console.warn('[multi-auth] No available accounts (rate-limited or invalidated).')
+    return null
   }
 
   let selectedAlias: string
@@ -83,5 +85,20 @@ export function markRateLimited(alias: string, cooldownMs: number): void {
 export function clearRateLimit(alias: string): void {
   updateAccount(alias, {
     rateLimitedUntil: undefined
+  })
+}
+
+export function markAuthInvalid(alias: string): void {
+  updateAccount(alias, {
+    authInvalid: true,
+    authInvalidatedAt: Date.now()
+  })
+  console.warn(`[multi-auth] Account ${alias} marked invalidated`)
+}
+
+export function clearAuthInvalid(alias: string): void {
+  updateAccount(alias, {
+    authInvalid: false,
+    authInvalidatedAt: undefined
   })
 }

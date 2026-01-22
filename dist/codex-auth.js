@@ -34,7 +34,7 @@ export function writeCodexAuthFile(auth) {
         mode: 0o600
     });
 }
-function decodeJwtPayload(token) {
+export function decodeJwtPayload(token) {
     try {
         const parts = token.split('.');
         if (parts.length !== 3)
@@ -48,7 +48,7 @@ function decodeJwtPayload(token) {
         return null;
     }
 }
-function getEmailFromClaims(claims) {
+export function getEmailFromClaims(claims) {
     if (!claims)
         return undefined;
     if (typeof claims.email === 'string')
@@ -58,13 +58,13 @@ function getEmailFromClaims(claims) {
         return profile.email;
     return undefined;
 }
-function getAccountIdFromClaims(claims) {
+export function getAccountIdFromClaims(claims) {
     if (!claims)
         return undefined;
     const auth = claims['https://api.openai.com/auth'];
     return auth?.chatgpt_account_id;
 }
-function getExpiryFromClaims(claims) {
+export function getExpiryFromClaims(claims) {
     if (!claims)
         return undefined;
     const exp = claims.exp;

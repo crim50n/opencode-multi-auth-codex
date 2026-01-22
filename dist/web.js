@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import { URL } from 'node:url';
-import { refreshToken } from './auth.js';
+import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js';
 import { getCodexAuthPath, getCodexAuthStatus, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js';
 import { getStoreStatus, listAccounts, loadStore, removeAccount, updateAccount } from './store.js';
 import { getRefreshQueueState, startRefreshQueue, stopRefreshQueue } from './refresh-queue.js';
@@ -13,6 +13,8 @@ const SYNC_DEBOUNCE_MS = 600;
 let lastSyncAt = 0;
 let lastSyncError = null;
 let syncTimer = null;
+let pendingLogin = null;
+let lastLoginError = null;
 const HTML = `<!doctype html>
 <html lang="en">
   <head>
@@ -101,6 +103,27 @@ const HTML = `<!doctype html>
         flex-wrap: wrap;
         gap: 10px;
         align-items: center;
+      }
+      .add-row {
+        display: flex;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .add-row input {
+        flex: 1;
+        background: var(--panel-2);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        padding: 12px 14px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 14px;
+      }
+      .add-row input::placeholder {
+        color: var(--muted);
+      }
+      .add-row button {
+        white-space: nowrap;
       }
       button {
         cursor: pointer;
@@ -354,8 +377,13 @@ const HTML = `<!doctype html>
           <button class="secondary" id="refreshLimitsBtn">Refresh limits (all)</button>
           <button class="secondary" id="refreshBtn">Refresh UI</button>
         </div>
+        <div class="add-row">
+          <input id="addAliasInput" placeholder="New account alias (e.g., acc8)" />
+          <button class="secondary" id="addAccountBtn">Add account</button>
+        </div>
         <div class="queue" id="queue"></div>
         <div class="notice" id="notice"></div>
+        <div class="notice" id="loginNotice"></div>
       </section>
       <section class="panel">
         <div class="filters">
@@ -393,6 +421,7 @@ const HTML = `<!doctype html>
       const refreshLimitsBtn = document.getElementById('refreshLimitsBtn')
       const refreshBtn = document.getElementById('refreshBtn')
       const notice = document.getElementById('notice')
+      const loginNotice = document.getElementById('loginNotice')
       const toast = document.getElementById('toast')
       const queueEl = document.getElementById('queue')
       const searchInput = document.getElementById('searchInput')
@@ -402,6 +431,8 @@ const HTML = `<!doctype html>
       const logBox = document.getElementById('logBox')
       const refreshLogsBtn = document.getElementById('refreshLogsBtn')
       const logPathEl = document.getElementById('logPath')
+      const addAliasInput = document.getElementById('addAliasInput')
+      const addAccountBtn = document.getElementById('addAccountBtn')
 
       let latestState = null
       let pollTimer = null
@@ -633,7 +664,7 @@ const HTML = `<!doctype html>
               </div>
               <div class="account-meta">
                 <div>Token expires: \${formatDate(acc.expiresAt)}</div>
-                <div>Last seen: \${acc.lastSeenAt ? formatDate(acc.lastSeenAt) : 'never'}</div>
+                <div>Last seen: \${acc.lastSeenAt ? formatDate(acc.lastSeenAt) : acc.lastUsed ? formatDate(acc.lastUsed) : 'never'}</div>
                 <div>Last refresh: \${acc.lastRefresh ? formatDate(acc.lastRefresh) : 'unknown'}</div>
                 <div>Usage count: \${acc.usageCount ?? 0}</div>
                 \${acc.limitError ? \`<div style="color: var(--danger);">Limit error: \${escapeHtml(acc.limitError)}</div>\` : ''}
@@ -696,6 +727,21 @@ const HTML = `<!doctype html>
         notice.textContent = state.lastSyncError || storeStatus.error || ''
       }
 
+      function renderLogin(state) {
+        if (!loginNotice) return
+        if (state.login && state.login.url) {
+          const alias = escapeHtml(state.login.alias || 'account')
+          const url = escapeHtml(state.login.url)
+          loginNotice.innerHTML = 'Login in progress for <strong>' + alias + '</strong> — <a href="' + url + '" target="_blank" rel="noreferrer">Open login</a>'
+          return
+        }
+        if (state.lastLoginError) {
+          loginNotice.textContent = 'Login error: ' + state.lastLoginError
+          return
+        }
+        loginNotice.textContent = ''
+      }
+
       function renderQueue(state) {
         const queue = state.queue
         refreshLimitsBtn.disabled = Boolean(queue?.running)
@@ -743,6 +789,7 @@ const HTML = `<!doctype html>
         renderMeta(state)
         renderQueue(state)
         renderAccounts(state)
+        renderLogin(state)
         updatePolling(state.queue)
       }
 
@@ -833,6 +880,31 @@ const HTML = `<!doctype html>
         await refreshLogs()
         showToast('Logs refreshed')
       })
+
+      if (addAccountBtn && addAliasInput) {
+        const startLogin = async () => {
+          const raw = addAliasInput.value.trim()
+          const alias = raw || 'account-' + Date.now()
+          try {
+            const result = await api('/api/auth/start', {
+              method: 'POST',
+              body: JSON.stringify({ alias })
+            })
+            addAliasInput.value = alias
+            if (result?.url && loginNotice) {
+              const url = escapeHtml(result.url)
+              loginNotice.innerHTML = 'Login in progress for <strong>' + escapeHtml(alias) + '</strong> — <a href="' + url + '" target="_blank" rel="noreferrer">Open login</a>'
+            }
+            showToast('Open login URL')
+          } catch (err) {
+            showToast('Login start failed')
+          }
+        }
+        addAccountBtn.addEventListener('click', startLogin)
+        addAliasInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') startLogin()
+        })
+      }
 
       searchInput.addEventListener('input', () => {
         if (latestState) renderAccounts(latestState)
@@ -971,8 +1043,7 @@ export function startWebConsole(options) {
         if (req.method === 'GET' && path === '/api/state') {
             runSync();
             const store = loadStore();
-            const rawAccounts = Object.values(store.accounts)
-                .filter((acc) => acc.source === 'codex' || acc.idToken || acc.accountId);
+            const rawAccounts = Object.values(store.accounts);
             const accounts = rawAccounts.map(scrubAccount);
             const storeStatus = getStoreStatus();
             sendJson(res, 200, {
@@ -982,6 +1053,8 @@ export function startWebConsole(options) {
                 lastSyncAt,
                 lastSyncError,
                 storeStatus,
+                login: pendingLogin,
+                lastLoginError,
                 queue: getRefreshQueueState(),
                 recommendedAlias: recommendAlias(rawAccounts),
                 logPath: getLogPath()
@@ -1001,6 +1074,39 @@ export function startWebConsole(options) {
                 sendJson(res, 200, { ok: true });
             }
             catch (err) {
+                sendJson(res, 500, { error: String(err) });
+            }
+            return;
+        }
+        if (req.method === 'POST' && path === '/api/auth/start') {
+            const body = await readJsonBody(req);
+            const alias = typeof body.alias === 'string' ? body.alias.trim() : '';
+            if (!alias) {
+                sendJson(res, 400, { error: 'Missing alias' });
+                return;
+            }
+            if (pendingLogin) {
+                sendJson(res, 409, { error: `Login already in progress for ${pendingLogin.alias}` });
+                return;
+            }
+            try {
+                const flow = await createAuthorizationFlow();
+                pendingLogin = { alias, startedAt: Date.now(), url: flow.url };
+                lastLoginError = null;
+                loginAccount(alias, flow)
+                    .then(() => {
+                    logInfo(`Login completed for ${alias}`);
+                    pendingLogin = null;
+                })
+                    .catch((err) => {
+                    lastLoginError = String(err);
+                    logError(`Login failed for ${alias}: ${err}`);
+                    pendingLogin = null;
+                });
+                sendJson(res, 200, { ok: true, url: flow.url });
+            }
+            catch (err) {
+                lastLoginError = String(err);
                 sendJson(res, 500, { error: String(err) });
             }
             return;
@@ -1054,7 +1160,7 @@ export function startWebConsole(options) {
         if (req.method === 'POST' && path === '/api/token/refresh') {
             const body = await readJsonBody(req);
             const store = loadStore();
-            const candidates = Object.values(store.accounts).filter((acc) => acc.source === 'codex' || acc.idToken || acc.accountId);
+            const candidates = Object.values(store.accounts);
             const alias = typeof body.alias === 'string' ? body.alias : undefined;
             const targets = alias ? candidates.filter((acc) => acc.alias === alias) : candidates;
             if (alias && targets.length === 0) {

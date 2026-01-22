@@ -53,7 +53,7 @@ export function writeCodexAuthFile(auth: CodexAuthFile): void {
   })
 }
 
-function decodeJwtPayload(token: string): Record<string, any> | null {
+export function decodeJwtPayload(token: string): Record<string, any> | null {
   try {
     const parts = token.split('.')
     if (parts.length !== 3) return null
@@ -66,7 +66,7 @@ function decodeJwtPayload(token: string): Record<string, any> | null {
   }
 }
 
-function getEmailFromClaims(claims: Record<string, any> | null): string | undefined {
+export function getEmailFromClaims(claims: Record<string, any> | null): string | undefined {
   if (!claims) return undefined
   if (typeof claims.email === 'string') return claims.email
   const profile = claims['https://api.openai.com/profile'] as { email?: string } | undefined
@@ -74,13 +74,13 @@ function getEmailFromClaims(claims: Record<string, any> | null): string | undefi
   return undefined
 }
 
-function getAccountIdFromClaims(claims: Record<string, any> | null): string | undefined {
+export function getAccountIdFromClaims(claims: Record<string, any> | null): string | undefined {
   if (!claims) return undefined
   const auth = claims['https://api.openai.com/auth'] as { chatgpt_account_id?: string } | undefined
   return auth?.chatgpt_account_id
 }
 
-function getExpiryFromClaims(claims: Record<string, any> | null): number | undefined {
+export function getExpiryFromClaims(claims: Record<string, any> | null): number | undefined {
   if (!claims) return undefined
   const exp = claims.exp
   if (typeof exp === 'number') return exp * 1000

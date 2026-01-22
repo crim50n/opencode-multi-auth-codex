@@ -12,6 +12,8 @@ export interface AccountCredentials {
     lastUsed?: number;
     usageCount: number;
     rateLimitedUntil?: number;
+    authInvalid?: boolean;
+    authInvalidatedAt?: number;
     rateLimits?: AccountRateLimits;
     rateLimitHistory?: RateLimitHistoryEntry[];
     limitStatus?: LimitStatus;

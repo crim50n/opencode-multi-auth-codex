@@ -2,7 +2,7 @@ import type { Plugin, PluginInput } from '@opencode-ai/plugin'
 import { syncAuthFromOpenCode } from './auth-sync.js'
 import { createAuthorizationFlow, loginAccount } from './auth.js'
 import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
-import { getNextAccount, markRateLimited } from './rotation.js'
+import { getNextAccount, markAuthInvalid, markRateLimited } from './rotation.js'
 import { listAccounts, updateAccount } from './store.js'
 import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
@@ -246,6 +246,28 @@ const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             }
 
             // Handle rate limiting with automatic rotation
+            if (res.status === 401 || res.status === 403) {
+              const errorData = await res.clone().json().catch(() => ({})) as { error?: { message?: string } }
+              const message = errorData?.error?.message || ''
+              if (message.toLowerCase().includes('invalidated') || res.status === 401) {
+                markAuthInvalid(account.alias)
+              }
+
+              const retryRotation = await getNextAccount(pluginConfig)
+              if (retryRotation && retryRotation.account.alias !== account.alias) {
+                return customFetch(input, init)
+              }
+
+              return new Response(
+                JSON.stringify({
+                  error: {
+                    message: `[multi-auth] Unauthorized on all accounts. ${message}`.trim()
+                  }
+                }),
+                { status: res.status, headers: { 'Content-Type': 'application/json' } }
+              )
+            }
+
             if (res.status === 429) {
               markRateLimited(account.alias, pluginConfig.rateLimitCooldownMs)
 

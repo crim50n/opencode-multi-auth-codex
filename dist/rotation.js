@@ -10,11 +10,13 @@ export async function getNextAccount(config) {
     const now = Date.now();
     const availableAliases = aliases.filter(alias => {
         const acc = store.accounts[alias];
-        return !acc.rateLimitedUntil || acc.rateLimitedUntil < now;
+        const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now;
+        const notInvalidated = !acc.authInvalid;
+        return notRateLimited && notInvalidated;
     });
     if (availableAliases.length === 0) {
-        console.warn('[multi-auth] All accounts rate-limited. Using first available.');
-        availableAliases.push(aliases[0]);
+        console.warn('[multi-auth] No available accounts (rate-limited or invalidated).');
+        return null;
     }
     let selectedAlias;
     switch (config.rotationStrategy) {
@@ -65,6 +67,19 @@ export function markRateLimited(alias, cooldownMs) {
 export function clearRateLimit(alias) {
     updateAccount(alias, {
         rateLimitedUntil: undefined
+    });
+}
+export function markAuthInvalid(alias) {
+    updateAccount(alias, {
+        authInvalid: true,
+        authInvalidatedAt: Date.now()
+    });
+    console.warn(`[multi-auth] Account ${alias} marked invalidated`);
+}
+export function clearAuthInvalid(alias) {
+    updateAccount(alias, {
+        authInvalid: false,
+        authInvalidatedAt: undefined
     });
 }
 //# sourceMappingURL=rotation.js.map
