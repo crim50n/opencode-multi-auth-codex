@@ -186,22 +186,27 @@ Or with other plugins:
 
 ### iPhone notifications via ntfy (click to open session)
 
-If you want notifications on iOS (with a **clickable link** to the OpenCode web session), use `ntfy`.
+If you want push notifications on iOS (with a clickable link to the OpenCode web session), use `ntfy`.
 
 1) Install the **ntfy** app on iPhone and subscribe to a topic.
 
 2) Set these env vars on the Mac where OpenCode runs:
 
-- `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_URL`:
+- `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_URL`
   Example: `https://ntfy.sh/<your-topic>` (or your self-hosted ntfy URL)
-- `OPENCODE_MULTI_AUTH_NOTIFY_UI_BASE_URL`:
+- `OPENCODE_MULTI_AUTH_NOTIFY_UI_BASE_URL`
   Base URL of your OpenCode web UI reachable from iPhone.
   Example (Tailscale): `http://100.x.y.z:4096`
 - Optional: `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_TOKEN` (Bearer token)
 
-When a session goes idle, the plugin will POST to ntfy and attach a `Click:` URL like:
-`<base>/session/<sessionID>`.
+The plugin sends notifications for:
 
+- `session.idle` (finished): priority `3`
+- `session.status` with `retry`: priority `4`
+- `session.error`: priority `5`
+
+When possible, the notification body includes `Project` + session `Title`, plus the `sessionID`.
+It also attaches a `Click:` URL like `<base>/session/<sessionID>` so tapping the push opens the session.
 
 This plugin can send a **macOS notification + sound** when a session finishes work.
 It listens for OpenCode events (`session.status` and `session.idle`).

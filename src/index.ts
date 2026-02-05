@@ -157,13 +157,14 @@ async function convertSseToJson(response: Response, headers: Headers): Promise<R
  *
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
  */
-const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl }: PluginInput) => {
+const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, directory }: PluginInput) => {
   const notifyEnabledRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY
   const notifyEnabled = notifyEnabledRaw !== '0' && notifyEnabledRaw !== 'false'
   const notifySound = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_SOUND || '/System/Library/Sounds/Glass.aiff').trim()
 
   const lastStatusBySession = new Map<string, string>()
-  const lastNotifiedAtBySession = new Map<string, number>()
+  const lastNotifiedAtByKey = new Map<string, number>()
+  const lastRetryAttemptBySession = new Map<string, number>()
 
   const escapeAppleScriptString = (value: string): string => {
     return String(value)
@@ -209,27 +210,133 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl }: PluginInput) =>
     return `${base}/session/${sessionID}`
   }
 
-  const notifyNtfy = async (sessionID: string): Promise<void> => {
+
+
+  const projectLabel = (((project as any)?.name as string | undefined) || project?.id || '').trim() || 'OpenCode'
+
+  type SessionMeta = { title?: string }
+  const sessionMetaCache = new Map<string, SessionMeta>()
+
+  const getSessionMeta = async (sessionID: string): Promise<SessionMeta> => {
+    const cached = sessionMetaCache.get(sessionID)
+    if (cached?.title) return cached
+
+    try {
+      const res = await client.session.get({
+        path: { id: sessionID },
+        query: { directory }
+      })
+
+      // @opencode-ai/sdk returns { data } shape.
+      const data = (res as any)?.data as { title?: string } | undefined
+      const meta: SessionMeta = { title: data?.title }
+      sessionMetaCache.set(sessionID, meta)
+      return meta
+    } catch {
+      const meta: SessionMeta = cached || {}
+      sessionMetaCache.set(sessionID, meta)
+      return meta
+    }
+  }
+
+  const formatTitle = (kind: 'idle' | 'retry' | 'error'): string => {
+    if (kind === 'error') return `OpenCode - ${projectLabel} - Error`
+    if (kind === 'retry') return `OpenCode - ${projectLabel} - Retrying`
+    return `OpenCode - ${projectLabel}`
+  }
+
+  const formatBody = async (kind: 'idle' | 'retry' | 'error', sessionID: string, detail?: string): Promise<string> => {
+    const meta = await getSessionMeta(sessionID)
+    const titleLine = meta.title ? `Task: ${meta.title}` : ''
+    const url = getSessionUrl(sessionID)
+
+    if (kind === 'idle') {
+      return [titleLine, `Session finished: ${sessionID}`, detail || '', url].filter(Boolean).join('\n')
+    }
+
+    if (kind === 'retry') {
+      return [titleLine, `Retrying: ${sessionID}`, detail || '', url].filter(Boolean).join('\n')
+    }
+
+    return [titleLine, `Error: ${sessionID}`, detail || '', url].filter(Boolean).join('\n')
+  }
+
+  const notifyMacRich = async (kind: 'idle' | 'retry' | 'error', sessionID: string, detail?: string): Promise<void> => {
+    const body = await formatBody(kind, sessionID, detail)
+    notifyMac(formatTitle(kind), body)
+  }
+
+  const notifyNtfyRich = async (kind: 'idle' | 'retry' | 'error', sessionID: string, detail?: string): Promise<void> => {
     if (!notifyEnabled) return
     if (!ntfyUrl) return
 
     const sessionUrl = getSessionUrl(sessionID)
+    const title = formatTitle(kind)
+    const body = await formatBody(kind, sessionID, detail)
+
+    // ntfy priority: 1=min, 3=default, 5=max
+    const priority = kind === 'error' ? '5' : kind === 'retry' ? '4' : '3'
 
     const headers: Record<string, string> = {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Title': 'OpenCode',
-      'Priority': '3'
+      'Title': title,
+      'Priority': priority
     }
 
-    // If ntfy supports click actions, attach a click URL.
     if (sessionUrl) headers['Click'] = sessionUrl
     if (ntfyToken) headers['Authorization'] = `Bearer ${ntfyToken}`
 
-    const body = sessionUrl ? `Session idle: ${sessionID}
-${sessionUrl}` : `Session idle: ${sessionID}`
-
     try {
       await fetch(ntfyUrl, { method: 'POST', headers, body })
+    } catch {
+      // ignore
+    }
+  }
+  const shouldThrottle = (key: string, minMs: number): boolean => {
+    const last = lastNotifiedAtByKey.get(key) || 0
+    const now = Date.now()
+    if (now - last < minMs) return true
+    lastNotifiedAtByKey.set(key, now)
+    return false
+  }
+
+  const formatRetryDetail = (status: any): string => {
+    const attempt = typeof status?.attempt === 'number' ? status.attempt : undefined
+    const message = typeof status?.message === 'string' ? status.message : ''
+    const next = typeof status?.next === 'number' ? status.next : undefined
+
+    const parts: string[] = []
+    if (typeof attempt === 'number') parts.push(`Attempt: ${attempt}`)
+    // SDK defines next as a number; it behaves like seconds-until-next.
+    if (typeof next === 'number') parts.push(`Next in: ${Math.max(0, Math.round(next))}s`)
+    if (message) parts.push(message)
+    return parts.join(' | ')
+  }
+
+  const formatErrorDetail = (err: any): string => {
+    if (!err || typeof err !== 'object') return ''
+    const name = typeof err.name === 'string' ? err.name : ''
+    const code = typeof err.code === 'string' ? err.code : ''
+    const message =
+      (typeof err.message === 'string' && err.message) ||
+      (typeof err.error?.message === 'string' && err.error.message) ||
+      ''
+    return [name, code, message].filter(Boolean).join(': ')
+  }
+
+  const notifyRich = async (
+    kind: 'idle' | 'retry' | 'error',
+    sessionID: string,
+    detail?: string
+  ): Promise<void> => {
+    try {
+      await notifyMacRich(kind, sessionID, detail)
+    } catch {
+      // ignore
+    }
+
+    try {
+      await notifyNtfyRich(kind, sessionID, detail)
     } catch {
       // ignore
     }
@@ -240,11 +347,53 @@ ${sessionUrl}` : `Session idle: ${sessionID}`
       if (!notifyEnabled) return
       if (!event || !('type' in event)) return
 
+      if (event.type === 'session.created' || event.type === 'session.updated') {
+        const info = (event as any).properties?.info as
+          | { id?: string; title?: string }
+          | undefined
+        const id = info?.id
+        if (id) {
+          sessionMetaCache.set(id, { title: info?.title })
+        }
+        return
+      }
+
       if (event.type === 'session.status') {
         const sessionID = (event as any).properties?.sessionID as string | undefined
-        const statusType = (event as any).properties?.status?.type as string | undefined
+        const status = (event as any).properties?.status
+        const statusType = status?.type as string | undefined
         if (!sessionID || !statusType) return
+
         lastStatusBySession.set(sessionID, statusType)
+
+        if (statusType === 'retry') {
+          const attempt = typeof status?.attempt === 'number' ? status.attempt : undefined
+          const prevAttempt = lastRetryAttemptBySession.get(sessionID)
+
+          if (typeof attempt === 'number') {
+            if (prevAttempt === attempt && shouldThrottle(`retry:${sessionID}:${attempt}`, 5000)) {
+              return
+            }
+            lastRetryAttemptBySession.set(sessionID, attempt)
+          }
+
+          const key = `retry:${sessionID}:${typeof attempt === 'number' ? attempt : 'na'}`
+          if (shouldThrottle(key, 2000)) return
+
+          await notifyRich('retry', sessionID, formatRetryDetail(status))
+        }
+
+        return
+      }
+
+      if (event.type === 'session.error') {
+        const sessionID = (event as any).properties?.sessionID as string | undefined
+        const id = sessionID || 'unknown'
+        const err = (event as any).properties?.error
+        const detail = formatErrorDetail(err)
+        const key = `error:${id}:${detail}`
+        if (shouldThrottle(key, 2000)) return
+        await notifyRich('error', id, detail)
         return
       }
 
@@ -253,17 +402,9 @@ ${sessionUrl}` : `Session idle: ${sessionID}`
         if (!sessionID) return
 
         const prev = lastStatusBySession.get(sessionID)
-        const last = lastNotifiedAtBySession.get(sessionID) || 0
-        const n = Date.now()
-
-        // Avoid spamming when multiple idle events arrive.
-        if (n - last < 2000) return
-
-        // Notify only if we were doing something.
         if (prev === 'busy' || prev === 'retry') {
-          lastNotifiedAtBySession.set(sessionID, n)
-          notifyMac('OpenCode', `Session idle: ${sessionID}`)
-          await notifyNtfy(sessionID)
+          if (shouldThrottle(`idle:${sessionID}`, 2000)) return
+          await notifyRich('idle', sessionID)
         }
 
         lastStatusBySession.set(sessionID, 'idle')
