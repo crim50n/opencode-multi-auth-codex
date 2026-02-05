@@ -180,6 +180,20 @@ Or with other plugins:
 }
 ```
 
+## Codex Latest Model Mapping
+
+OpenCode may not list the newest Codex model yet (it keeps an internal allowlist).
+This plugin can still use the newest model by **mapping** the selected Codex model
+to the latest backend model on ChatGPT.
+
+Default behavior:
+- If you select `openai/gpt-5.2-codex` (or `openai/gpt-5-codex`), the plugin will send requests as `gpt-5.3-codex`.
+
+Environment variables:
+- `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=0` disables the mapping (use exact model).
+- `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.3-codex` overrides the target model.
+- `OPENCODE_MULTI_AUTH_DEBUG=1` prints mapping logs like: `model map: gpt-5.2-codex -> gpt-5.3-codex`.
+
 ## Troubleshooting
 
 ### BunInstallFailedError (DependencyLoop)

@@ -68,7 +68,20 @@ function normalizeModel(model) {
     if (!model)
         return 'gpt-5.1';
     const modelId = model.includes('/') ? model.split('/').pop() : model;
-    return modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '');
+    const baseModel = modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '');
+    // OpenCode currently allowlists gpt-5.2-codex, but we can route it to the latest
+    // Codex model on the ChatGPT backend for users who want the newest model without
+    // waiting for upstream registry updates.
+    const preferLatestRaw = process.env.OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST;
+    const preferLatest = preferLatestRaw !== '0' && preferLatestRaw !== 'false';
+    if (preferLatest && (baseModel === 'gpt-5.2-codex' || baseModel === 'gpt-5-codex')) {
+        const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
+        if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+            console.log(`[multi-auth] model map: ${baseModel} -> ${latestModel}`);
+        }
+        return latestModel;
+    }
+    return baseModel;
 }
 function ensureContentType(headers) {
     const responseHeaders = new Headers(headers);
@@ -130,6 +143,40 @@ async function convertSseToJson(response, headers) {
  */
 const MultiAuthPlugin = async ({ client }) => {
     return {
+        config: async (config) => {
+            const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
+            try {
+                ;
+                (config.provider ||= {});
+                const openai = (config.provider[PROVIDER_ID] ||= {});
+                openai.models ||= {};
+                openai.whitelist ||= [];
+                if (!openai.models[latestModel]) {
+                    openai.models[latestModel] = {
+                        id: latestModel,
+                        name: 'GPT-5.3 Codex',
+                        reasoning: true,
+                        tool_call: true,
+                        temperature: true,
+                        limit: {
+                            context: 400000,
+                            output: 128000
+                        }
+                    };
+                }
+                if (Array.isArray(openai.whitelist) && !openai.whitelist.includes(latestModel)) {
+                    openai.whitelist.push(latestModel);
+                }
+                if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+                    console.log(`[multi-auth] injected ${latestModel} into runtime config`);
+                }
+            }
+            catch (err) {
+                if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+                    console.log('[multi-auth] config injection failed:', err);
+                }
+            }
+        },
         auth: {
             provider: PROVIDER_ID,
             /**

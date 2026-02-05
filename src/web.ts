@@ -1,8 +1,11 @@
 import * as fs from 'node:fs'
 import * as http from 'node:http'
+import * as https from 'node:https'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { URL } from 'node:url'
+import { exec } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js'
 import { getCodexAuthPath, getCodexAuthStatus, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js'
 import { getStoreStatus, listAccounts, loadStore, removeAccount, updateAccount } from './store.js'
@@ -16,11 +19,15 @@ const SYNC_INTERVAL_MS = 3000
 const SYNC_DEBOUNCE_MS = 600
 const ANTIGRAVITY_ACCOUNTS_FILE = path.join(os.homedir(), '.config', 'opencode', 'antigravity-accounts.json')
 
+const execAsync = promisify(exec)
+
 let lastSyncAt = 0
 let lastSyncError: string | null = null
 let syncTimer: NodeJS.Timeout | null = null
 let pendingLogin: { alias: string; startedAt: number; url: string } | null = null
 let lastLoginError: string | null = null
+let antigravityQuotaState: AntigravityQuotaState = { status: 'idle', scope: 'active' }
+let antigravityQuotaInFlight: Promise<AntigravityQuotaState> | null = null
 
 const HTML = `<!doctype html>
 <html lang="en">
@@ -395,6 +402,18 @@ const HTML = `<!doctype html>
         background: rgba(255, 107, 107, 0.18);
         color: var(--danger);
       }
+      .ag-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .ag-summary {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        margin: 12px 0;
+      }
       @media (max-width: 720px) {
         header { padding: 26px 18px 10px; }
         .container { padding: 0 16px 28px; }
@@ -449,9 +468,17 @@ const HTML = `<!doctype html>
             <div style="font-size: 16px; font-weight: 600;">Antigravity accounts</div>
             <div class="notice" id="antigravityPath"></div>
           </div>
-          <button class="secondary" id="copyAgLogin">Copy reauth command</button>
+        <div class="ag-actions">
+            <button class="secondary" id="refreshAg">Refresh</button>
+            <button class="secondary" id="refreshAgLimits">Refresh limits (active)</button>
+            <button class="secondary" id="refreshAgLimitsAll">Refresh limits (all)</button>
+            <button class="secondary" id="copyAgPath">Copy path</button>
+            <button class="secondary" id="copyAgLogin">Copy reauth command</button>
+          </div>
         </div>
+        <div class="meta ag-summary" id="antigravitySummary"></div>
         <div class="notice" id="antigravityNotice"></div>
+        <div class="limit-grid" id="antigravityQuota"></div>
         <div class="ag-grid" id="antigravityAccounts"></div>
         <div class="notice">Reauth: <code>opencode auth login</code> · Optional reset: remove the antigravity accounts file, then login again.</div>
       </section>
@@ -490,6 +517,12 @@ const HTML = `<!doctype html>
       const agPathEl = document.getElementById('antigravityPath')
       const agNoticeEl = document.getElementById('antigravityNotice')
       const agAccountsEl = document.getElementById('antigravityAccounts')
+      const agSummaryEl = document.getElementById('antigravitySummary')
+      const agQuotaEl = document.getElementById('antigravityQuota')
+      const refreshAgBtn = document.getElementById('refreshAg')
+      const refreshAgLimitsBtn = document.getElementById('refreshAgLimits')
+      const refreshAgLimitsAllBtn = document.getElementById('refreshAgLimitsAll')
+      const copyAgPathBtn = document.getElementById('copyAgPath')
       const copyAgLoginBtn = document.getElementById('copyAgLogin')
 
       let latestState = null
@@ -516,6 +549,25 @@ const HTML = `<!doctype html>
       function formatDate(value) {
         if (!value) return 'unknown'
         return new Date(value).toLocaleString()
+      }
+
+      function formatRelative(value) {
+        if (!value) return 'unknown'
+        const ts = new Date(value).getTime()
+        if (!Number.isFinite(ts)) return 'unknown'
+        const diff = Date.now() - ts
+        const minute = 60 * 1000
+        const hour = 60 * minute
+        const day = 24 * hour
+        if (diff < minute) return 'just now'
+        if (diff < hour) return Math.floor(diff / minute) + 'm ago'
+        if (diff < day) return Math.floor(diff / hour) + 'h ago'
+        return Math.floor(diff / day) + 'd ago'
+      }
+
+      function formatWhen(value) {
+        if (!value) return 'unknown'
+        return formatDate(value) + ' · ' + formatRelative(value)
       }
 
       function escapeHtml(value) {
@@ -830,8 +882,71 @@ const HTML = `<!doctype html>
         if (agPathEl) {
           agPathEl.textContent = ag.path ? 'Path: ' + ag.path : ''
         }
+        const quota = ag.quota || {}
+        const quotaStatus = quota.status || 'idle'
+        const quotaScope = quota.scope || 'active'
+        const quotaFetched = quota.fetchedAt ? formatWhen(quota.fetchedAt) : 'never'
         if (agNoticeEl) {
-          agNoticeEl.textContent = ag.error || ''
+          const errorBits = []
+          if (ag.error) errorBits.push(ag.error)
+          if (quotaStatus === 'error') {
+            errorBits.push('Quota error: ' + (quota.error || 'unknown'))
+          } else if (quotaStatus === 'ok') {
+            errorBits.push('Quota updated: ' + quotaFetched)
+          } else {
+            errorBits.push('Quota not loaded yet')
+          }
+          agNoticeEl.textContent = errorBits.filter(Boolean).join(' · ')
+        }
+        if (agSummaryEl) {
+          const accounts = Array.isArray(ag.accounts) ? ag.accounts : []
+          const activeIndex = typeof ag.activeIndex === 'number' ? ag.activeIndex : null
+          const activeAccount = activeIndex !== null ? accounts.find((acc) => acc.index === activeIndex) : null
+          const activeLabel = activeAccount ? (activeAccount.alias || ('#' + activeAccount.index)) : '—'
+          const lastRead = ag.readAt ? formatWhen(ag.readAt) : 'unknown'
+          const hasResetTimes = accounts.some((acc) => acc.rateLimitResetTimes && Object.keys(acc.rateLimitResetTimes).length > 0)
+          const hasLiveLimits = quotaStatus === 'ok' && quota.snapshot && Array.isArray(quota.snapshot.models) && quota.snapshot.models.length > 0
+          const limitsLabel = hasLiveLimits
+            ? (quotaScope === 'all' ? 'Live quotas (all)' : 'Live quotas (active)')
+            : (hasResetTimes ? 'Reset times only' : 'n/a')
+          agSummaryEl.innerHTML = '' +
+            '<div class="meta-item"><span>Total</span><strong>' + accounts.length + '</strong></div>' +
+            '<div class="meta-item"><span>Active</span><strong>' + escapeHtml(activeLabel) + '</strong></div>' +
+            '<div class="meta-item"><span>Last read</span><strong>' + lastRead + '</strong></div>' +
+            '<div class="meta-item"><span>Limits data</span><strong>' + limitsLabel + '</strong></div>'
+        }
+        if (agQuotaEl) {
+          if (quotaStatus === 'ok' && quota.snapshot) {
+            const snapshot = quota.snapshot
+            const prompt = snapshot.promptCredits
+            const promptCard = prompt ? (
+              '<div class="limit-card">' +
+                '<strong>Prompt credits</strong>' +
+                '<span>Remaining: ' + prompt.available + ' / ' + prompt.monthly + '</span><br />' +
+                '<span>Remaining %: ' + Math.round(prompt.remainingPercentage) + '%</span>' +
+              '</div>'
+            ) : ''
+            const modelCards = (snapshot.models || []).map((model) => {
+              const remaining = typeof model.remainingPercentage === 'number'
+                ? Math.round(model.remainingPercentage) + '%'
+                : 'unknown'
+              const reset = model.timeUntilResetFormatted || (model.resetTime ? formatDate(model.resetTime) : 'unknown')
+              return '' +
+                '<div class="limit-card">' +
+                  '<strong>' + escapeHtml(model.label || model.modelId || 'model') + '</strong>' +
+                  '<span>Remaining: ' + remaining + '</span><br />' +
+                  '<span>Reset: ' + reset + '</span>' +
+                '</div>'
+            }).join('')
+            const none = !promptCard && !modelCards
+            agQuotaEl.innerHTML = none
+              ? '<div class="notice" style="grid-column: 1 / -1;">No quota data yet.</div>'
+              : (promptCard + modelCards + '<div class="notice" style="grid-column: 1 / -1;">Limits reflect the ' + (quotaScope === 'all' ? 'last refreshed account' : 'active Antigravity account') + '.</div>')
+          } else if (quotaStatus === 'error') {
+            agQuotaEl.innerHTML = '<div class="notice" style="grid-column: 1 / -1;">Quota error: ' + escapeHtml(quota.error || 'unknown') + '</div>'
+          } else {
+            agQuotaEl.innerHTML = '<div class="notice" style="grid-column: 1 / -1;">Click "Refresh limits" to load Antigravity quotas.</div>'
+          }
         }
         if (!agAccountsEl) return
         const accounts = Array.isArray(ag.accounts) ? ag.accounts : []
@@ -839,20 +954,50 @@ const HTML = `<!doctype html>
           agAccountsEl.innerHTML = '<div class="notice">No Antigravity accounts found.</div>'
           return
         }
+        const perAccount = quota.perAccount || {}
         agAccountsEl.innerHTML = accounts.map((acc) => {
           const active = acc.index === ag.activeIndex
+          const lastUsed = acc.lastUsed ? new Date(acc.lastUsed).getTime() : 0
+          const stale = lastUsed ? (Date.now() - lastUsed) > (7 * 24 * 60 * 60 * 1000) : false
           const activeBadge = active ? '<span class="ag-badge active">Active</span>' : '<span class="ag-badge">Stored</span>'
           const tokenBadge = acc.hasRefreshToken ? '<span class="ag-badge">token</span>' : '<span class="ag-badge missing">missing token</span>'
+          const staleBadge = stale ? '<span class="ag-badge missing">stale</span>' : ''
+          const resetEntries = acc.rateLimitResetTimes ? Object.entries(acc.rateLimitResetTimes) : []
+          const resetText = resetEntries.length
+            ? resetEntries.map(([key, value]) => escapeHtml(key) + ': ' + formatWhen(value)).join(' · ')
+            : 'unknown (no reset info)'
+          const quotaSnapshot = perAccount[acc.index]
+          const quotaPrompt = quotaSnapshot?.promptCredits
+          const quotaModels = quotaSnapshot?.models || []
+          const quotaSummary = quotaSnapshot
+            ? (
+                '<div class="ag-row"><span class="ag-label">Quota updated</span><span>' + formatWhen(quotaSnapshot.timestamp) + '</span></div>' +
+                (quotaSnapshot.email ? '<div class="ag-row"><span class="ag-label">Quota email</span><span>' + escapeHtml(quotaSnapshot.email) + '</span></div>' : '') +
+                (quotaPrompt
+                  ? '<div class="ag-row"><span class="ag-label">Prompt credits</span><span>' + quotaPrompt.available + ' / ' + quotaPrompt.monthly + '</span></div>'
+                  : '') +
+                (quotaModels.length
+                  ? '<div class="ag-row"><span class="ag-label">Models</span><span>' +
+                      quotaModels.slice(0, 3).map((model) => {
+                        const remaining = typeof model.remainingPercentage === 'number' ? Math.round(model.remainingPercentage) + '%' : 'n/a'
+                        return escapeHtml(model.label || model.modelId || 'model') + ': ' + remaining
+                      }).join(' · ') +
+                    '</span></div>'
+                  : '')
+              )
+            : '<div class="ag-row"><span class="ag-label">Quota</span><span>not loaded</span></div>'
           return '' +
             '<div class="ag-card">' +
               '<div class="ag-row">' +
                 '<strong>' + escapeHtml(acc.alias || ('#' + acc.index)) + '</strong>' +
-                '<div style="display:flex; gap:6px;">' + activeBadge + tokenBadge + '</div>' +
+                '<div style="display:flex; gap:6px;">' + activeBadge + tokenBadge + staleBadge + '</div>' +
               '</div>' +
               '<div class="ag-row"><span class="ag-label">Project</span><span>' + escapeHtml(acc.projectId || 'unknown') + '</span></div>' +
               '<div class="ag-row"><span class="ag-label">Managed</span><span>' + escapeHtml(acc.managedProjectId || '—') + '</span></div>' +
-              '<div class="ag-row"><span class="ag-label">Added</span><span>' + (acc.addedAt ? formatDate(acc.addedAt) : 'unknown') + '</span></div>' +
-              '<div class="ag-row"><span class="ag-label">Last used</span><span>' + (acc.lastUsed ? formatDate(acc.lastUsed) : 'never') + '</span></div>' +
+              '<div class="ag-row"><span class="ag-label">Added</span><span>' + (acc.addedAt ? formatWhen(acc.addedAt) : 'unknown') + '</span></div>' +
+              '<div class="ag-row"><span class="ag-label">Last used</span><span>' + (acc.lastUsed ? formatWhen(acc.lastUsed) : 'never') + '</span></div>' +
+              '<div class="ag-row"><span class="ag-label">Limits reset</span><span>' + resetText + '</span></div>' +
+              quotaSummary +
             '</div>'
         }).join('')
       }
@@ -977,6 +1122,45 @@ const HTML = `<!doctype html>
           try {
             await navigator.clipboard.writeText('opencode auth login')
             showToast('Command copied')
+          } catch {
+            showToast('Copy failed')
+          }
+        })
+      }
+
+      if (refreshAgBtn) {
+        refreshAgBtn.addEventListener('click', async () => {
+          await refreshState()
+          showToast('Antigravity refreshed')
+        })
+      }
+
+      if (refreshAgLimitsBtn) {
+        refreshAgLimitsBtn.addEventListener('click', async () => {
+          await api('/api/antigravity/refresh', { method: 'POST', body: '{}' })
+          await refreshState()
+          showToast('Antigravity limits refreshed')
+        })
+      }
+
+      if (refreshAgLimitsAllBtn) {
+        refreshAgLimitsAllBtn.addEventListener('click', async () => {
+          await api('/api/antigravity/refresh-all', { method: 'POST', body: '{}' })
+          await refreshState()
+          showToast('Antigravity limits refreshed (all)')
+        })
+      }
+
+      if (copyAgPathBtn) {
+        copyAgPathBtn.addEventListener('click', async () => {
+          try {
+            const path = latestState?.antigravity?.path || ''
+            if (path) {
+              await navigator.clipboard.writeText(path)
+              showToast('Path copied')
+            } else {
+              showToast('No path')
+            }
           } catch {
             showToast('Copy failed')
           }
@@ -1126,15 +1310,52 @@ type AntigravityAccountView = {
   addedAt?: number | string
   lastUsed?: number | string
   hasRefreshToken: boolean
+  rateLimitResetTimes?: Record<string, number>
+}
+
+type AntigravityPromptCredits = {
+  available: number
+  monthly: number
+  usedPercentage: number
+  remainingPercentage: number
+}
+
+type AntigravityQuotaModel = {
+  label: string
+  modelId: string
+  remainingFraction?: number
+  remainingPercentage?: number
+  isExhausted: boolean
+  resetTime?: number
+  timeUntilResetMs?: number
+  timeUntilResetFormatted?: string
+}
+
+type AntigravityQuotaSnapshot = {
+  timestamp: number
+  name?: string
+  email?: string
+  promptCredits?: AntigravityPromptCredits
+  models: AntigravityQuotaModel[]
+}
+
+type AntigravityQuotaState = {
+  status: 'idle' | 'ok' | 'error'
+  scope?: 'active' | 'all'
+  fetchedAt?: number
+  error?: string
+  snapshot?: AntigravityQuotaSnapshot
+  perAccount?: Record<number, AntigravityQuotaSnapshot>
 }
 
 function loadAntigravityAccounts(): {
   path: string
   error?: string
   activeIndex?: number
+  readAt?: number
   accounts: AntigravityAccountView[]
 } {
-  const result = { path: ANTIGRAVITY_ACCOUNTS_FILE, accounts: [] as AntigravityAccountView[] }
+  const result = { path: ANTIGRAVITY_ACCOUNTS_FILE, accounts: [] as AntigravityAccountView[], readAt: Date.now() }
   if (!fs.existsSync(ANTIGRAVITY_ACCOUNTS_FILE)) {
     return { ...result, error: 'antigravity-accounts.json not found' }
   }
@@ -1149,12 +1370,357 @@ function loadAntigravityAccounts(): {
       managedProjectId: acc?.managedProjectId,
       addedAt: acc?.addedAt,
       lastUsed: acc?.lastUsed,
-      hasRefreshToken: Boolean(acc?.refreshToken)
+      hasRefreshToken: Boolean(acc?.refreshToken),
+      rateLimitResetTimes: acc?.rateLimitResetTimes && typeof acc.rateLimitResetTimes === 'object'
+        ? acc.rateLimitResetTimes
+        : undefined
     }))
     return { ...result, activeIndex, accounts: view }
   } catch (err) {
     return { ...result, error: `Failed to parse antigravity accounts: ${err}` }
   }
+}
+
+function isAntigravityProcessLine(line: string): boolean {
+  const lower = line.toLowerCase()
+  if (lower.includes('antigravity')) return true
+  return /--app_data_dir\s+antigravity\b/i.test(line)
+}
+
+function getAntigravityProcessName(): string | null {
+  if (process.platform === 'darwin') {
+    return `language_server_macos${process.arch === 'arm64' ? '_arm' : ''}`
+  }
+  if (process.platform === 'linux') {
+    return `language_server_linux${process.arch === 'arm64' ? '_arm' : '_x64'}`
+  }
+  if (process.platform === 'win32') {
+    return 'language_server_windows_x64.exe'
+  }
+  return null
+}
+
+async function detectAntigravityProcessInfo(): Promise<{ pid: number; extensionPort: number; csrfToken: string; connectPort: number } | null> {
+  const processName = getAntigravityProcessName()
+  if (!processName) {
+    throw new Error('Unsupported platform for Antigravity quotas')
+  }
+  if (process.platform === 'win32') {
+    throw new Error('Antigravity quota detection is not implemented for Windows yet')
+  }
+
+  const cmd = process.platform === 'darwin' ? `pgrep -fl ${processName}` : `pgrep -af ${processName}`
+  const { stdout } = await execAsync(cmd)
+  const lines = stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const tokenLines = lines.filter((line) => line.includes('--csrf_token'))
+  if (tokenLines.length === 0) {
+    return null
+  }
+
+  const ordered = [
+    ...tokenLines.filter(isAntigravityProcessLine),
+    ...tokenLines.filter((line) => !isAntigravityProcessLine(line))
+  ]
+
+  for (const line of ordered) {
+    const parts = line.split(/\s+/)
+    const pid = Number(parts[0])
+    if (!Number.isFinite(pid)) {
+      continue
+    }
+    const portMatch = line.match(/--extension_server_port[=\s]+(\d+)/)
+    const tokenMatch = line.match(/--csrf_token[=\s]+([a-zA-Z0-9\-]+)/)
+    if (!tokenMatch) {
+      continue
+    }
+    const extensionPort = portMatch ? Number(portMatch[1]) : 0
+    const csrfToken = tokenMatch[1]
+    const ports = await listListeningPorts(pid)
+    const workingPort = await findWorkingPort(ports, csrfToken)
+    const connectPort = workingPort || (extensionPort > 0 ? extensionPort : 0)
+    if (!connectPort) {
+      return null
+    }
+    return { pid, extensionPort, csrfToken, connectPort }
+  }
+
+  return null
+}
+
+async function listListeningPorts(pid: number): Promise<number[]> {
+  try {
+    const cmd = `lsof -nP -a -iTCP -sTCP:LISTEN -p ${pid}`
+    const { stdout } = await execAsync(cmd)
+    const ports = new Set<number>()
+    const regex = /:(\d+)\s+\(LISTEN\)/g
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(stdout)) !== null) {
+      const port = Number(match[1])
+      if (Number.isFinite(port)) {
+        ports.add(port)
+      }
+    }
+    return Array.from(ports.values()).sort((a, b) => a - b)
+  } catch {
+    return []
+  }
+}
+
+function antigravityRequest<T>(port: number, csrfToken: string, pathName: string, body: object): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body)
+    const req = https.request(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path: pathName,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          'Connect-Protocol-Version': '1',
+          'X-Codeium-Csrf-Token': csrfToken
+        },
+        rejectUnauthorized: false,
+        timeout: 5000
+      },
+      (res) => {
+        let data = ''
+        res.on('data', (chunk) => { data += chunk })
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data) as T)
+          } catch {
+            reject(new Error('Invalid JSON response'))
+          }
+        })
+      }
+    )
+    req.on('error', reject)
+    req.on('timeout', () => {
+      req.destroy()
+      reject(new Error('Request timeout'))
+    })
+    req.write(payload)
+    req.end()
+  })
+}
+
+async function testAntigravityPort(port: number, csrfToken: string): Promise<boolean> {
+  try {
+    await antigravityRequest<any>(
+      port,
+      csrfToken,
+      '/exa.language_server_pb.LanguageServerService/GetUnleashData',
+      { wrapper_data: {} }
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function findWorkingPort(ports: number[], csrfToken: string): Promise<number | null> {
+  for (const port of ports) {
+    const ok = await testAntigravityPort(port, csrfToken)
+    if (ok) return port
+  }
+  return null
+}
+
+function formatAntigravityDuration(ms: number, resetTime?: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return 'Ready'
+  const mins = Math.ceil(ms / 60000)
+  let duration = ''
+  if (mins < 60) {
+    duration = `${mins}m`
+  } else {
+    const hours = Math.floor(mins / 60)
+    duration = `${hours}h ${mins % 60}m`
+  }
+  if (!resetTime) return duration
+  const resetDate = new Date(resetTime)
+  const dateStr = resetDate.toLocaleDateString(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' })
+  const timeStr = resetDate.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+  return `${duration} (${dateStr} ${timeStr})`
+}
+
+function updateAntigravityActiveIndex(raw: any, index: number): any {
+  const next = { ...raw }
+  next.activeIndex = index
+  if (next.activeIndexByFamily && typeof next.activeIndexByFamily === 'object') {
+    next.activeIndexByFamily = { ...next.activeIndexByFamily }
+    for (const key of Object.keys(next.activeIndexByFamily)) {
+      next.activeIndexByFamily[key] = index
+    }
+  }
+  return next
+}
+
+async function refreshAntigravityQuotaAll(): Promise<AntigravityQuotaState> {
+  if (antigravityQuotaInFlight) {
+    return antigravityQuotaInFlight
+  }
+  antigravityQuotaInFlight = (async () => {
+    let originalRaw = ''
+    let parsed: any
+    try {
+      if (!fs.existsSync(ANTIGRAVITY_ACCOUNTS_FILE)) {
+        throw new Error('antigravity-accounts.json not found')
+      }
+      originalRaw = fs.readFileSync(ANTIGRAVITY_ACCOUNTS_FILE, 'utf-8')
+      parsed = JSON.parse(originalRaw)
+      const accounts = Array.isArray(parsed?.accounts) ? parsed.accounts : []
+      if (accounts.length === 0) {
+        throw new Error('No Antigravity accounts available')
+      }
+
+      const perAccount: Record<number, AntigravityQuotaSnapshot> = {}
+      for (let index = 0; index < accounts.length; index += 1) {
+        const next = updateAntigravityActiveIndex(parsed, index)
+        fs.writeFileSync(ANTIGRAVITY_ACCOUNTS_FILE, JSON.stringify(next, null, 2))
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        const snapshot = await fetchAntigravityQuota()
+        perAccount[index] = snapshot
+      }
+
+      antigravityQuotaState = {
+        status: 'ok',
+        scope: 'all',
+        fetchedAt: Date.now(),
+        snapshot: perAccount[parsed.activeIndex ?? 0] || perAccount[0],
+        perAccount
+      }
+    } catch (err) {
+      antigravityQuotaState = {
+        status: 'error',
+        scope: 'all',
+        fetchedAt: Date.now(),
+        error: String(err),
+        perAccount: antigravityQuotaState.perAccount
+      }
+    } finally {
+      if (originalRaw) {
+        try {
+          fs.writeFileSync(ANTIGRAVITY_ACCOUNTS_FILE, originalRaw)
+        } catch (err) {
+          logError(`Failed to restore antigravity accounts file: ${err}`)
+        }
+      }
+      antigravityQuotaInFlight = null
+    }
+    return antigravityQuotaState
+  })()
+  return antigravityQuotaInFlight
+}
+
+function parseAntigravityQuota(data: any): AntigravityQuotaSnapshot {
+  const userStatus = data?.userStatus
+  const planInfo = userStatus?.planStatus?.planInfo
+  const availableCredits = userStatus?.planStatus?.availablePromptCredits
+  let promptCredits: AntigravityPromptCredits | undefined
+
+  if (planInfo && availableCredits !== undefined) {
+    const monthly = Number(planInfo.monthlyPromptCredits)
+    const available = Number(availableCredits)
+    if (Number.isFinite(monthly) && monthly > 0) {
+      promptCredits = {
+        available,
+        monthly,
+        usedPercentage: ((monthly - available) / monthly) * 100,
+        remainingPercentage: (available / monthly) * 100
+      }
+    }
+  }
+
+  const rawModels = userStatus?.cascadeModelConfigData?.clientModelConfigs || []
+  const models: AntigravityQuotaModel[] = rawModels
+    .filter((model: any) => model?.quotaInfo)
+    .map((model: any) => {
+      const reset = model.quotaInfo?.resetTime ? new Date(model.quotaInfo.resetTime) : null
+      const resetTime = reset ? reset.getTime() : undefined
+      const remainingFraction = typeof model.quotaInfo?.remainingFraction === 'number'
+        ? model.quotaInfo.remainingFraction
+        : undefined
+      const remainingPercentage = typeof remainingFraction === 'number'
+        ? remainingFraction * 100
+        : undefined
+      const diff = resetTime ? resetTime - Date.now() : undefined
+      const label = model.label || model.modelOrAlias?.model || 'model'
+      const modelId = model.modelOrAlias?.model || model.modelOrAlias?.alias || 'unknown'
+      return {
+        label,
+        modelId,
+        remainingFraction,
+        remainingPercentage,
+        isExhausted: remainingFraction === 0,
+        resetTime,
+        timeUntilResetMs: diff,
+        timeUntilResetFormatted: typeof diff === 'number' ? formatAntigravityDuration(diff, resetTime) : undefined
+      }
+    })
+
+  return {
+    timestamp: Date.now(),
+    name: userStatus?.name,
+    email: userStatus?.email,
+    promptCredits,
+    models
+  }
+}
+
+async function fetchAntigravityQuota(): Promise<AntigravityQuotaSnapshot> {
+  const info = await detectAntigravityProcessInfo()
+  if (!info) {
+    throw new Error('Antigravity process not found')
+  }
+
+  const data = await antigravityRequest<any>(
+    info.connectPort,
+    info.csrfToken,
+    '/exa.language_server_pb.LanguageServerService/GetUserStatus',
+    {
+      metadata: {
+        ideName: 'antigravity',
+        extensionName: 'antigravity',
+        locale: 'en'
+      }
+    }
+  )
+
+  return parseAntigravityQuota(data)
+}
+
+async function refreshAntigravityQuota(): Promise<AntigravityQuotaState> {
+  if (antigravityQuotaInFlight) {
+    return antigravityQuotaInFlight
+  }
+  antigravityQuotaInFlight = (async () => {
+    try {
+      const snapshot = await fetchAntigravityQuota()
+      antigravityQuotaState = {
+        status: 'ok',
+        scope: 'active',
+        fetchedAt: Date.now(),
+        snapshot
+      }
+    } catch (err) {
+      antigravityQuotaState = {
+        status: 'error',
+        scope: 'active',
+        fetchedAt: Date.now(),
+        error: String(err)
+      }
+    } finally {
+      antigravityQuotaInFlight = null
+    }
+    return antigravityQuotaState
+  })()
+  return antigravityQuotaInFlight
 }
 
 function scheduleSync(): void {
@@ -1196,6 +1762,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
       const rawAccounts = Object.values(store.accounts)
       const accounts = rawAccounts.map(scrubAccount)
       const storeStatus = getStoreStatus()
+      const antigravity = loadAntigravityAccounts()
       sendJson(res, 200, {
         authPath: getCodexAuthPath(),
         currentAlias: store.activeAlias,
@@ -1205,7 +1772,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
         storeStatus,
         login: pendingLogin,
         lastLoginError,
-        antigravity: loadAntigravityAccounts(),
+        antigravity: { ...antigravity, quota: antigravityQuotaState },
         queue: getRefreshQueueState(),
         recommendedAlias: recommendAlias(rawAccounts),
         logPath: getLogPath()
@@ -1366,6 +1933,18 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
     if (req.method === 'POST' && path === '/api/limits/stop') {
       stopRefreshQueue()
       sendJson(res, 200, { ok: true })
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/antigravity/refresh') {
+      await refreshAntigravityQuota()
+      sendJson(res, 200, { ok: true, quota: antigravityQuotaState })
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/antigravity/refresh-all') {
+      await refreshAntigravityQuotaAll()
+      sendJson(res, 200, { ok: true, quota: antigravityQuotaState })
       return
     }
 
