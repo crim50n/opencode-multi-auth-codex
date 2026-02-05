@@ -141,8 +141,76 @@ async function convertSseToJson(response, headers) {
  *
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
  */
-const MultiAuthPlugin = async ({ client }) => {
+const MultiAuthPlugin = async ({ client, $ }) => {
+    const notifyEnabledRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY;
+    const notifyEnabled = notifyEnabledRaw !== '0' && notifyEnabledRaw !== 'false';
+    const notifySound = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_SOUND || '/System/Library/Sounds/Glass.aiff').trim();
+    const lastStatusBySession = new Map();
+    const lastNotifiedAtBySession = new Map();
+    const escapeAppleScriptString = (value) => {
+        return String(value)
+            .replaceAll('\\', '\\\\')
+            .replaceAll('"', '\"')
+            .replaceAll(String.fromCharCode(10), '\n');
+    };
+    const notifyMac = (title, message) => {
+        if (!notifyEnabled)
+            return;
+        if (process.platform !== 'darwin')
+            return;
+        try {
+            const osascript = '/usr/bin/osascript';
+            const safeTitle = escapeAppleScriptString(title);
+            const safeMessage = escapeAppleScriptString(message);
+            const script = `display notification "${safeMessage}" with title "${safeTitle}"`;
+            // Fire-and-forget: never block OpenCode event processing.
+            $ `${osascript} -e ${script}`.nothrow().catch(() => { });
+        }
+        catch {
+            // ignore
+        }
+        if (!notifySound)
+            return;
+        try {
+            const afplay = '/usr/bin/afplay';
+            $ `${afplay} ${notifySound}`.nothrow().catch(() => { });
+        }
+        catch {
+            // ignore
+        }
+    };
     return {
+        event: async ({ event }) => {
+            if (!notifyEnabled)
+                return;
+            if (!event || !('type' in event))
+                return;
+            if (event.type === 'session.status') {
+                const sessionID = event.properties?.sessionID;
+                const statusType = event.properties?.status?.type;
+                if (!sessionID || !statusType)
+                    return;
+                lastStatusBySession.set(sessionID, statusType);
+                return;
+            }
+            if (event.type === 'session.idle') {
+                const sessionID = event.properties?.sessionID;
+                if (!sessionID)
+                    return;
+                const prev = lastStatusBySession.get(sessionID);
+                const last = lastNotifiedAtBySession.get(sessionID) || 0;
+                const n = Date.now();
+                // Avoid spamming when multiple idle events arrive.
+                if (n - last < 2000)
+                    return;
+                // Notify only if we were doing something.
+                if (prev === 'busy' || prev === 'retry') {
+                    lastNotifiedAtBySession.set(sessionID, n);
+                    notifyMac('OpenCode', `Session idle: ${sessionID}`);
+                }
+                lastStatusBySession.set(sessionID, 'idle');
+            }
+        },
         config: async (config) => {
             const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
             try {

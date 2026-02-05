@@ -180,6 +180,24 @@ Or with other plugins:
 }
 ```
 
+
+## Background Notifications (macOS)
+
+This plugin can send a **macOS notification + sound** when a session finishes work.
+It listens for OpenCode events (`session.status` and `session.idle`).
+
+Defaults:
+- Enabled by default
+- Sound: `/System/Library/Sounds/Glass.aiff`
+
+Environment variables:
+- `OPENCODE_MULTI_AUTH_NOTIFY=0` disables notifications
+- `OPENCODE_MULTI_AUTH_NOTIFY_SOUND=/path/to/sound.aiff` overrides the sound
+
+If OpenCode seems to only make progress when the window is focused, macOS may be throttling it.
+Try disabling App Nap for OpenCode.app (Finder -> Get Info -> Prevent App Nap),
+or run the server from a terminal under `caffeinate`.
+
 ## Codex Latest Model Mapping
 
 OpenCode may not list the newest Codex model yet (it keeps an internal allowlist).
