@@ -218,6 +218,9 @@ Defaults:
 Environment variables:
 - `OPENCODE_MULTI_AUTH_NOTIFY=0` disables notifications
 - `OPENCODE_MULTI_AUTH_NOTIFY_SOUND=/path/to/sound.aiff` overrides the sound
+- `OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN=0` disables click-to-open on macOS (when available)
+
+Clickable macOS notifications require `terminal-notifier` (optional). If installed, clicking the banner opens the session URL.
 
 If OpenCode seems to only make progress when the window is focused, macOS may be throttling it.
 Try disabling App Nap for OpenCode.app (Finder -> Get Info -> Prevent App Nap),

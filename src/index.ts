@@ -1,4 +1,5 @@
 import type { Plugin, PluginInput } from '@opencode-ai/plugin'
+import fs from 'node:fs'
 import { syncAuthFromOpenCode } from './auth-sync.js'
 import { createAuthorizationFlow, loginAccount } from './auth.js'
 import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
@@ -158,6 +159,21 @@ async function convertSseToJson(response: Response, headers: Headers): Promise<R
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
  */
 const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, directory }: PluginInput) => {
+  const terminalNotifierPath = (() => {
+    const candidates = [
+      '/opt/homebrew/bin/terminal-notifier',
+      '/usr/local/bin/terminal-notifier'
+    ]
+    for (const c of candidates) {
+      try {
+        if (fs.existsSync(c)) return c
+      } catch {
+        // ignore
+      }
+    }
+    return null
+  })()
+
   const notifyEnabledRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY
   const notifyEnabled = notifyEnabledRaw !== '0' && notifyEnabledRaw !== 'false'
   const notifySound = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_SOUND || '/System/Library/Sounds/Glass.aiff').trim()
@@ -173,20 +189,43 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
       .replaceAll(String.fromCharCode(10), '\n')
   }
 
-  const notifyMac = (title: string, message: string): void => {
+  let didWarnTerminalNotifier = false
+
+  const notifyMac = (title: string, message: string, clickUrl?: string): void => {
     if (!notifyEnabled) return
     if (process.platform !== 'darwin') return
 
-    try {
-      const osascript = '/usr/bin/osascript'
-      const safeTitle = escapeAppleScriptString(title)
-      const safeMessage = escapeAppleScriptString(message)
-      const script = `display notification "${safeMessage}" with title "${safeTitle}"`
+    const macOpenRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN
+    const macOpenEnabled = macOpenRaw !== '0' && macOpenRaw !== 'false'
 
-      // Fire-and-forget: never block OpenCode event processing.
-      $`${osascript} -e ${script}`.nothrow().catch(() => {})
-    } catch {
-      // ignore
+    // Best effort: clickable notifications require terminal-notifier.
+    if (macOpenEnabled && clickUrl && terminalNotifierPath) {
+      try {
+        $`${terminalNotifierPath} -title ${title} -message ${message} -open ${clickUrl}`
+          .nothrow()
+          .catch(() => {})
+      } catch {
+        // ignore
+      }
+    } else {
+      if (macOpenEnabled && clickUrl && !terminalNotifierPath && !didWarnTerminalNotifier) {
+        didWarnTerminalNotifier = true
+        if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+          console.log('[multi-auth] mac click-to-open requires terminal-notifier (brew install terminal-notifier)')
+        }
+      }
+
+      try {
+        const osascript = '/usr/bin/osascript'
+        const safeTitle = escapeAppleScriptString(title)
+        const safeMessage = escapeAppleScriptString(message)
+        const script = `display notification "${safeMessage}" with title "${safeTitle}"`
+
+        // Fire-and-forget: never block OpenCode event processing.
+        $`${osascript} -e ${script}`.nothrow().catch(() => {})
+      } catch {
+        // ignore
+      }
     }
 
     if (!notifySound) return
@@ -263,7 +302,7 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
   const notifyMacRich = async (kind: 'idle' | 'retry' | 'error', sessionID: string, detail?: string): Promise<void> => {
     const body = await formatBody(kind, sessionID, detail)
-    notifyMac(formatTitle(kind), body)
+    notifyMac(formatTitle(kind), body, getSessionUrl(sessionID) || undefined)
   }
 
   const notifyNtfyRich = async (kind: 'idle' | 'retry' | 'error', sessionID: string, detail?: string): Promise<void> => {
