@@ -141,7 +141,7 @@ async function convertSseToJson(response, headers) {
  *
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
  */
-const MultiAuthPlugin = async ({ client, $ }) => {
+const MultiAuthPlugin = async ({ client, $, serverUrl }) => {
     const notifyEnabledRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY;
     const notifyEnabled = notifyEnabledRaw !== '0' && notifyEnabledRaw !== 'false';
     const notifySound = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_SOUND || '/System/Library/Sounds/Glass.aiff').trim();
@@ -179,6 +179,40 @@ const MultiAuthPlugin = async ({ client, $ }) => {
             // ignore
         }
     };
+    const ntfyUrl = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_NTFY_URL || '').trim();
+    const ntfyToken = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_NTFY_TOKEN || '').trim();
+    const notifyUiBaseUrl = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_UI_BASE_URL || '').trim();
+    const getSessionUrl = (sessionID) => {
+        const base = (notifyUiBaseUrl || serverUrl?.origin || '').replace(/\/$/, '');
+        if (!base)
+            return '';
+        return `${base}/session/${sessionID}`;
+    };
+    const notifyNtfy = async (sessionID) => {
+        if (!notifyEnabled)
+            return;
+        if (!ntfyUrl)
+            return;
+        const sessionUrl = getSessionUrl(sessionID);
+        const headers = {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Title': 'OpenCode',
+            'Priority': '3'
+        };
+        // If ntfy supports click actions, attach a click URL.
+        if (sessionUrl)
+            headers['Click'] = sessionUrl;
+        if (ntfyToken)
+            headers['Authorization'] = `Bearer ${ntfyToken}`;
+        const body = sessionUrl ? `Session idle: ${sessionID}
+${sessionUrl}` : `Session idle: ${sessionID}`;
+        try {
+            await fetch(ntfyUrl, { method: 'POST', headers, body });
+        }
+        catch {
+            // ignore
+        }
+    };
     return {
         event: async ({ event }) => {
             if (!notifyEnabled)
@@ -207,6 +241,7 @@ const MultiAuthPlugin = async ({ client, $ }) => {
                 if (prev === 'busy' || prev === 'retry') {
                     lastNotifiedAtBySession.set(sessionID, n);
                     notifyMac('OpenCode', `Session idle: ${sessionID}`);
+                    await notifyNtfy(sessionID);
                 }
                 lastStatusBySession.set(sessionID, 'idle');
             }

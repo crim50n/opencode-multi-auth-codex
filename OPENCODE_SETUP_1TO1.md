@@ -40,7 +40,7 @@ If Node/Bun are missing, install them first.
 Install this repo into OpenCode's config directory:
 
 ```bash
-bun add github:guard22/opencode-multi-auth-codex#v1.0.6 --cwd ~/.config/opencode
+bun add github:guard22/opencode-multi-auth-codex#v1.0.7 --cwd ~/.config/opencode
 ```
 
 If you prefer tracking `main` (not recommended for beginners):
