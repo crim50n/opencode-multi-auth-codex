@@ -1,6 +1,6 @@
 {
   "name": "@guard22/opencode-multi-auth-codex",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
   "main": "./dist/index.js",

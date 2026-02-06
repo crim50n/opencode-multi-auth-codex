@@ -140,12 +140,70 @@ export function saveStore(store) {
         return;
     }
     const passphrase = getPassphrase();
-    if (passphrase) {
-        const payload = encryptStore(store, passphrase);
-        fs.writeFileSync(STORE_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
-        return;
+    const payload = passphrase ? encryptStore(store, passphrase) : store;
+    const json = JSON.stringify(payload, null, 2);
+    // Best-effort backup to help recover from crashes/corruption.
+    try {
+        if (fs.existsSync(STORE_FILE)) {
+            fs.copyFileSync(STORE_FILE, `${STORE_FILE}.bak`);
+            fs.chmodSync(`${STORE_FILE}.bak`, 0o600);
+        }
     }
-    fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
+    catch {
+        // ignore backup failures
+    }
+    const tmp = `${STORE_FILE}.tmp-${process.pid}-${Date.now()}`;
+    let fd = null;
+    try {
+        fd = fs.openSync(tmp, 'w', 0o600);
+        fs.writeFileSync(fd, json, { encoding: 'utf-8' });
+        try {
+            fs.fsyncSync(fd);
+        }
+        catch {
+            // fsync not supported everywhere; best-effort
+        }
+    }
+    finally {
+        if (fd !== null) {
+            try {
+                fs.closeSync(fd);
+            }
+            catch {
+                // ignore
+            }
+        }
+    }
+    try {
+        fs.renameSync(tmp, STORE_FILE);
+    }
+    catch (err) {
+        // Windows can fail to rename over an existing file.
+        if (err?.code === 'EPERM' || err?.code === 'EEXIST') {
+            try {
+                fs.unlinkSync(STORE_FILE);
+            }
+            catch {
+                // ignore
+            }
+            fs.renameSync(tmp, STORE_FILE);
+        }
+        else {
+            try {
+                fs.unlinkSync(tmp);
+            }
+            catch {
+                // ignore
+            }
+            throw err;
+        }
+    }
+    try {
+        fs.chmodSync(STORE_FILE, 0o600);
+    }
+    catch {
+        // ignore
+    }
 }
 export function addAccount(alias, creds) {
     const store = loadStore();

@@ -1,15 +1,52 @@
-import { loadStore, saveStore, updateAccount } from './store.js';
+import { loadStore, saveStore } from './store.js';
 import { ensureValidToken } from './auth.js';
+function shuffle(items) {
+    const result = [...items];
+    for (let i = result.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+}
+function buildCandidateOrder(config, store, availableAliases) {
+    if (availableAliases.length <= 1)
+        return [...availableAliases];
+    switch (config.rotationStrategy) {
+        case 'round-robin': {
+            // Start from rotationIndex but try all candidates before giving up.
+            const start = store.rotationIndex % availableAliases.length;
+            return [...availableAliases.slice(start), ...availableAliases.slice(0, start)];
+        }
+        case 'least-used': {
+            return [...availableAliases].sort((a, b) => {
+                const accA = store.accounts[a];
+                const accB = store.accounts[b];
+                const usageA = accA?.usageCount ?? 0;
+                const usageB = accB?.usageCount ?? 0;
+                if (usageA !== usageB)
+                    return usageA - usageB;
+                const lastA = accA?.lastUsed ?? 0;
+                const lastB = accB?.lastUsed ?? 0;
+                return lastA - lastB;
+            });
+        }
+        case 'random': {
+            return shuffle(availableAliases);
+        }
+        default:
+            return [...availableAliases];
+    }
+}
 export async function getNextAccount(config) {
-    const store = loadStore();
-    const aliases = Object.keys(store.accounts);
+    const snapshot = loadStore();
+    const aliases = Object.keys(snapshot.accounts);
     if (aliases.length === 0) {
         console.error('[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>');
         return null;
     }
     const now = Date.now();
-    const availableAliases = aliases.filter(alias => {
-        const acc = store.accounts[alias];
+    const availableAliases = aliases.filter((alias) => {
+        const acc = snapshot.accounts[alias];
         const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now;
         const notInvalidated = !acc.authInvalid;
         return notRateLimited && notInvalidated;
@@ -18,40 +55,45 @@ export async function getNextAccount(config) {
         console.warn('[multi-auth] No available accounts (rate-limited or invalidated).');
         return null;
     }
-    let selectedAlias;
-    switch (config.rotationStrategy) {
-        case 'round-robin': {
-            const idx = store.rotationIndex % availableAliases.length;
-            selectedAlias = availableAliases[idx];
-            store.rotationIndex = (store.rotationIndex + 1) % availableAliases.length;
-            break;
-        }
-        case 'least-used': {
-            selectedAlias = availableAliases.reduce((min, alias) => {
-                const acc = store.accounts[alias];
-                const minAcc = store.accounts[min];
-                return acc.usageCount < minAcc.usageCount ? alias : min;
-            }, availableAliases[0]);
-            break;
-        }
-        case 'random': {
-            selectedAlias = availableAliases[Math.floor(Math.random() * availableAliases.length)];
-            break;
-        }
-        default:
-            selectedAlias = availableAliases[0];
+    const candidates = buildCandidateOrder(config, snapshot, availableAliases);
+    let selectedAlias = null;
+    let token = null;
+    // Important: ensureValidToken() may refresh and write the store.
+    // Never save a stale snapshot after this call, or we can overwrite refreshed tokens.
+    for (const alias of candidates) {
+        const maybeToken = await ensureValidToken(alias);
+        if (!maybeToken)
+            continue;
+        selectedAlias = alias;
+        token = maybeToken;
+        break;
     }
-    const token = await ensureValidToken(selectedAlias);
-    if (!token) {
-        console.error(`[multi-auth] Failed to get valid token for ${selectedAlias}`);
+    if (!selectedAlias || !token) {
+        console.error(`[multi-auth] Failed to get valid token for any available account (${candidates.length})`);
         return null;
     }
-    updateAccount(selectedAlias, {
-        usageCount: store.accounts[selectedAlias].usageCount + 1,
-        lastUsed: now
-    });
+    // Reload to include any token refresh updates before we persist rotation metadata.
+    const store = loadStore();
+    const account = store.accounts[selectedAlias];
+    if (!account) {
+        console.error(`[multi-auth] Selected account disappeared from store: ${selectedAlias}`);
+        return null;
+    }
+    store.accounts[selectedAlias] = {
+        ...account,
+        usageCount: (account.usageCount ?? 0) + 1,
+        lastUsed: now,
+        lastSeenAt: now
+    };
     store.activeAlias = selectedAlias;
     store.lastRotation = now;
+    if (config.rotationStrategy === 'round-robin') {
+        // Keep rotationIndex stable across calls even when some candidates fail refresh.
+        const idx = availableAliases.indexOf(selectedAlias);
+        if (idx >= 0) {
+            store.rotationIndex = (idx + 1) % availableAliases.length;
+        }
+    }
     saveStore(store);
     return {
         account: store.accounts[selectedAlias],
@@ -59,27 +101,47 @@ export async function getNextAccount(config) {
     };
 }
 export function markRateLimited(alias, cooldownMs) {
-    updateAccount(alias, {
+    const store = loadStore();
+    if (!store.accounts[alias])
+        return;
+    store.accounts[alias] = {
+        ...store.accounts[alias],
         rateLimitedUntil: Date.now() + cooldownMs
-    });
+    };
+    saveStore(store);
     console.warn(`[multi-auth] Account ${alias} marked rate-limited for ${cooldownMs / 1000}s`);
 }
 export function clearRateLimit(alias) {
-    updateAccount(alias, {
+    const store = loadStore();
+    if (!store.accounts[alias])
+        return;
+    store.accounts[alias] = {
+        ...store.accounts[alias],
         rateLimitedUntil: undefined
-    });
+    };
+    saveStore(store);
 }
 export function markAuthInvalid(alias) {
-    updateAccount(alias, {
+    const store = loadStore();
+    if (!store.accounts[alias])
+        return;
+    store.accounts[alias] = {
+        ...store.accounts[alias],
         authInvalid: true,
         authInvalidatedAt: Date.now()
-    });
+    };
+    saveStore(store);
     console.warn(`[multi-auth] Account ${alias} marked invalidated`);
 }
 export function clearAuthInvalid(alias) {
-    updateAccount(alias, {
+    const store = loadStore();
+    if (!store.accounts[alias])
+        return;
+    store.accounts[alias] = {
+        ...store.accounts[alias],
         authInvalid: false,
         authInvalidatedAt: undefined
-    });
+    };
+    saveStore(store);
 }
 //# sourceMappingURL=rotation.js.map
