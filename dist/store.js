@@ -2,16 +2,31 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'node:crypto';
-const STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth');
-const STORE_FILE = path.join(STORE_DIR, 'accounts.json');
+const STORE_DIR_ENV = 'OPENCODE_MULTI_AUTH_STORE_DIR';
+const STORE_FILE_ENV = 'OPENCODE_MULTI_AUTH_STORE_FILE';
+const DEFAULT_STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth');
+const DEFAULT_STORE_FILE = 'accounts.json';
+function getStoreDir() {
+    const override = process.env[STORE_DIR_ENV];
+    if (override && override.trim())
+        return path.resolve(override.trim());
+    return DEFAULT_STORE_DIR;
+}
+function getStoreFile() {
+    const override = process.env[STORE_FILE_ENV];
+    if (override && override.trim())
+        return path.resolve(override.trim());
+    return path.join(getStoreDir(), DEFAULT_STORE_FILE);
+}
 const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE';
 const STORE_VERSION = 1;
 let storeLocked = false;
 let lastStoreError = null;
 let lastStoreEncrypted = false;
 function ensureDir() {
-    if (!fs.existsSync(STORE_DIR)) {
-        fs.mkdirSync(STORE_DIR, { recursive: true, mode: 0o700 });
+    const dir = getStoreDir();
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 }
 function emptyStore() {
@@ -101,9 +116,10 @@ export function loadStore() {
     lastStoreError = null;
     lastStoreEncrypted = false;
     ensureDir();
-    if (fs.existsSync(STORE_FILE)) {
+    const file = getStoreFile();
+    if (fs.existsSync(file)) {
         try {
-            const data = fs.readFileSync(STORE_FILE, 'utf-8');
+            const data = fs.readFileSync(file, 'utf-8');
             const parsed = JSON.parse(data);
             if (isEncryptedFile(parsed)) {
                 lastStoreEncrypted = true;
@@ -142,10 +158,19 @@ export function saveStore(store) {
     const passphrase = getPassphrase();
     if (passphrase) {
         const payload = encryptStore(store, passphrase);
-        fs.writeFileSync(STORE_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
+        fs.writeFileSync(getStoreFile(), JSON.stringify(payload, null, 2), { mode: 0o600 });
         return;
     }
-    fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
+    fs.writeFileSync(getStoreFile(), JSON.stringify(store, null, 2), { mode: 0o600 });
+}
+export function getStoreDiagnostics() {
+    return {
+        storeDir: getStoreDir(),
+        storeFile: getStoreFile(),
+        locked: storeLocked,
+        encrypted: lastStoreEncrypted,
+        error: lastStoreError
+    };
 }
 export function addAccount(alias, creds) {
     const store = loadStore();
@@ -229,9 +254,10 @@ export function listAccounts() {
     return Object.values(store.accounts);
 }
 export function getStorePath() {
-    return STORE_FILE;
+    return getStoreFile();
 }
 export function getStoreStatus() {
-    return { locked: storeLocked, encrypted: lastStoreEncrypted, error: lastStoreError };
+    const diag = getStoreDiagnostics();
+    return { locked: diag.locked, encrypted: diag.encrypted, error: diag.error };
 }
 //# sourceMappingURL=store.js.map

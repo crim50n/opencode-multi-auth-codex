@@ -1,4 +1,4 @@
-import { loadStore, saveStore, updateAccount } from './store.js'
+import { getStoreDiagnostics, loadStore, saveStore, updateAccount } from './store.js'
 import { ensureValidToken } from './auth.js'
 import type { AccountCredentials, PluginConfig, DEFAULT_CONFIG } from './types.js'
 
@@ -12,7 +12,14 @@ export async function getNextAccount(config: typeof DEFAULT_CONFIG): Promise<Rot
   const aliases = Object.keys(store.accounts)
 
   if (aliases.length === 0) {
-    console.error('[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>')
+    const diag = getStoreDiagnostics()
+    const extra = diag.error ? ` (${diag.error})` : ''
+    console.error(
+      `[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>${extra}`
+    )
+    if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+      console.error(`[multi-auth] store file: ${diag.storeFile}`)
+    }
     return null
   }
 

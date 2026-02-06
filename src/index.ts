@@ -56,6 +56,38 @@ function rewriteUrlForCodex(url: string): string {
   return url.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES)
 }
 
+function extractPathAndSearch(url: string): string {
+  // OpenCode sometimes passes relative paths (e.g. "/chat/completions") or even
+  // malformed strings when provider base_url is missing (e.g. "undefined/...").
+  // We only need the path+query and then we force the ChatGPT backend base URL.
+  try {
+    const u = new URL(url)
+    return `${u.pathname}${u.search}`
+  } catch {
+    // best-effort fallback
+  }
+
+  const trimmed = String(url || '').trim()
+  if (trimmed.startsWith('/')) return trimmed
+  const firstSlash = trimmed.indexOf('/')
+  if (firstSlash >= 0) return trimmed.slice(firstSlash)
+  return trimmed
+}
+
+function toCodexBackendUrl(originalUrl: string): string {
+  const pathAndSearch = extractPathAndSearch(originalUrl)
+
+  // Map OpenAI v1 endpoints to ChatGPT Codex endpoints.
+  let mapped = pathAndSearch
+  if (mapped.includes(URL_PATHS.RESPONSES)) {
+    mapped = mapped.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES)
+  } else if (mapped.includes('/chat/completions')) {
+    mapped = mapped.replace('/chat/completions', '/codex/chat/completions')
+  }
+
+  return new URL(mapped, CODEX_BASE_URL).toString()
+}
+
 function filterInput(input: unknown): unknown {
   if (!Array.isArray(input)) return input
   return input
@@ -346,8 +378,12 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
     const parts: string[] = []
     if (typeof attempt === 'number') parts.push(`Attempt: ${attempt}`)
-    // SDK defines next as a number; it behaves like seconds-until-next.
-    if (typeof next === 'number') parts.push(`Next in: ${Math.max(0, Math.round(next))}s`)
+    // OpenCode has emitted both "seconds-until-next" and "epoch ms" variants over time.
+    if (typeof next === 'number') {
+      const seconds =
+        next > 1e12 ? Math.max(0, Math.round((next - Date.now()) / 1000)) : Math.max(0, Math.round(next))
+      parts.push(`Next in: ${seconds}s`)
+    }
     if (message) parts.push(message)
     return parts.join(' | ')
   }
@@ -452,8 +488,8 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
     config: async (config) => {
       const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim()
       try {
-        ;(config.provider ||= {})
-        const openai = (config.provider[PROVIDER_ID] ||= {}) as any
+        const openai = (config.provider?.[PROVIDER_ID] as any) || null
+        if (!openai || typeof openai !== 'object') return
         openai.models ||= {}
         openai.whitelist ||= []
 
@@ -526,7 +562,7 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
           }
 
           const originalUrl = extractRequestUrl(input)
-          const url = rewriteUrlForCodex(originalUrl)
+          const url = toCodexBackendUrl(originalUrl)
 
           let body: Record<string, any> = {}
           try {

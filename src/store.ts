@@ -2,10 +2,30 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as crypto from 'node:crypto'
-import type { AccountStore, AccountCredentials, RateLimitHistoryEntry, RateLimitSnapshot } from './types.js'
+import type {
+  AccountStore,
+  AccountCredentials,
+  RateLimitHistoryEntry,
+  RateLimitSnapshot
+} from './types.js'
 
-const STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth')
-const STORE_FILE = path.join(STORE_DIR, 'accounts.json')
+const STORE_DIR_ENV = 'OPENCODE_MULTI_AUTH_STORE_DIR'
+const STORE_FILE_ENV = 'OPENCODE_MULTI_AUTH_STORE_FILE'
+const DEFAULT_STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth')
+const DEFAULT_STORE_FILE = 'accounts.json'
+
+function getStoreDir(): string {
+  const override = process.env[STORE_DIR_ENV]
+  if (override && override.trim()) return path.resolve(override.trim())
+  return DEFAULT_STORE_DIR
+}
+
+function getStoreFile(): string {
+  const override = process.env[STORE_FILE_ENV]
+  if (override && override.trim()) return path.resolve(override.trim())
+  return path.join(getStoreDir(), DEFAULT_STORE_FILE)
+}
+
 const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE'
 const STORE_VERSION = 1
 
@@ -23,8 +43,9 @@ let lastStoreError: string | null = null
 let lastStoreEncrypted = false
 
 function ensureDir(): void {
-  if (!fs.existsSync(STORE_DIR)) {
-    fs.mkdirSync(STORE_DIR, { recursive: true, mode: 0o700 })
+  const dir = getStoreDir()
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
 }
 
@@ -128,9 +149,10 @@ export function loadStore(): AccountStore {
   lastStoreError = null
   lastStoreEncrypted = false
   ensureDir()
-  if (fs.existsSync(STORE_FILE)) {
+  const file = getStoreFile()
+  if (fs.existsSync(file)) {
     try {
-      const data = fs.readFileSync(STORE_FILE, 'utf-8')
+      const data = fs.readFileSync(file, 'utf-8')
       const parsed = JSON.parse(data)
       if (isEncryptedFile(parsed)) {
         lastStoreEncrypted = true
@@ -168,10 +190,26 @@ export function saveStore(store: AccountStore): void {
   const passphrase = getPassphrase()
   if (passphrase) {
     const payload = encryptStore(store, passphrase)
-    fs.writeFileSync(STORE_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 })
+    fs.writeFileSync(getStoreFile(), JSON.stringify(payload, null, 2), { mode: 0o600 })
     return
   }
-  fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), { mode: 0o600 })
+  fs.writeFileSync(getStoreFile(), JSON.stringify(store, null, 2), { mode: 0o600 })
+}
+
+export function getStoreDiagnostics(): {
+  storeDir: string
+  storeFile: string
+  locked: boolean
+  encrypted: boolean
+  error: string | null
+} {
+  return {
+    storeDir: getStoreDir(),
+    storeFile: getStoreFile(),
+    locked: storeLocked,
+    encrypted: lastStoreEncrypted,
+    error: lastStoreError
+  }
 }
 
 export function addAccount(alias: string, creds: Omit<AccountCredentials, 'alias' | 'usageCount'>): AccountStore {
@@ -263,9 +301,10 @@ export function listAccounts(): AccountCredentials[] {
 }
 
 export function getStorePath(): string {
-  return STORE_FILE
+  return getStoreFile()
 }
 
 export function getStoreStatus(): { locked: boolean; encrypted: boolean; error: string | null } {
-  return { locked: storeLocked, encrypted: lastStoreEncrypted, error: lastStoreError }
+  const diag = getStoreDiagnostics()
+  return { locked: diag.locked, encrypted: diag.encrypted, error: diag.error }
 }
