@@ -24,8 +24,9 @@ export async function getNextAccount(config) {
     const availableAliases = aliases.filter(alias => {
         const acc = store.accounts[alias];
         const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now;
+        const notModelUnsupported = !acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now;
         const notInvalidated = !acc.authInvalid;
-        return notRateLimited && notInvalidated;
+        return notRateLimited && notModelUnsupported && notInvalidated;
     });
     if (availableAliases.length === 0) {
         console.warn('[multi-auth] No available accounts (rate-limited or invalidated).');
@@ -103,6 +104,24 @@ export function markRateLimited(alias, cooldownMs) {
 export function clearRateLimit(alias) {
     updateAccount(alias, {
         rateLimitedUntil: undefined
+    });
+}
+export function markModelUnsupported(alias, cooldownMs, info) {
+    updateAccount(alias, {
+        modelUnsupportedUntil: Date.now() + cooldownMs,
+        modelUnsupportedAt: Date.now(),
+        modelUnsupportedModel: info?.model,
+        modelUnsupportedError: info?.error
+    });
+    const extra = info?.model ? ` (model=${info.model})` : '';
+    console.warn(`[multi-auth] Account ${alias} marked model-unsupported for ${cooldownMs / 1000}s${extra}`);
+}
+export function clearModelUnsupported(alias) {
+    updateAccount(alias, {
+        modelUnsupportedUntil: undefined,
+        modelUnsupportedAt: undefined,
+        modelUnsupportedModel: undefined,
+        modelUnsupportedError: undefined
     });
 }
 export function markAuthInvalid(alias) {

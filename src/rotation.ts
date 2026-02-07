@@ -36,8 +36,10 @@ export async function getNextAccount(config: typeof DEFAULT_CONFIG): Promise<Rot
   const availableAliases = aliases.filter(alias => {
     const acc = store.accounts[alias]
     const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now
+    const notModelUnsupported =
+      !acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now
     const notInvalidated = !acc.authInvalid
-    return notRateLimited && notInvalidated
+    return notRateLimited && notModelUnsupported && notInvalidated
   })
 
   if (availableAliases.length === 0) {
@@ -124,6 +126,32 @@ export function markRateLimited(alias: string, cooldownMs: number): void {
 export function clearRateLimit(alias: string): void {
   updateAccount(alias, {
     rateLimitedUntil: undefined
+  })
+}
+
+export function markModelUnsupported(
+  alias: string,
+  cooldownMs: number,
+  info?: { model?: string; error?: string }
+): void {
+  updateAccount(alias, {
+    modelUnsupportedUntil: Date.now() + cooldownMs,
+    modelUnsupportedAt: Date.now(),
+    modelUnsupportedModel: info?.model,
+    modelUnsupportedError: info?.error
+  })
+  const extra = info?.model ? ` (model=${info.model})` : ''
+  console.warn(
+    `[multi-auth] Account ${alias} marked model-unsupported for ${cooldownMs / 1000}s${extra}`
+  )
+}
+
+export function clearModelUnsupported(alias: string): void {
+  updateAccount(alias, {
+    modelUnsupportedUntil: undefined,
+    modelUnsupportedAt: undefined,
+    modelUnsupportedModel: undefined,
+    modelUnsupportedError: undefined
   })
 }
 

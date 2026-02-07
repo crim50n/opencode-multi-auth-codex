@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { syncAuthFromOpenCode } from './auth-sync.js'
 import { createAuthorizationFlow, loginAccount } from './auth.js'
 import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
-import { getNextAccount, markAuthInvalid, markRateLimited } from './rotation.js'
+import { getNextAccount, markAuthInvalid, markModelUnsupported, markRateLimited } from './rotation.js'
 import { listAccounts, updateAccount } from './store.js'
 import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
@@ -654,7 +654,7 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
               return new Response(
                 JSON.stringify({
                   error: {
-                    message: `[multi-auth] Unauthorized on all accounts. ${message}`.trim()
+                    message: `[multi-auth][acc=${account.alias}] Unauthorized on all accounts. ${message}`.trim()
                   }
                 }),
                 { status: res.status, headers: { 'Content-Type': 'application/json' } }
@@ -675,11 +675,49 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
               return new Response(
                 JSON.stringify({
                   error: {
-                    message: `[multi-auth] Rate limited on all accounts. ${errorData.error?.message || ''}`
+                    message: `[multi-auth][acc=${account.alias}] Rate limited on all accounts. ${errorData.error?.message || ''}`
                   }
                 }),
                 { status: 429, headers: { 'Content-Type': 'application/json' } }
               )
+            }
+
+            if (res.status === 400) {
+              // Some accounts get staged access to newer Codex models (e.g. gpt-5.3-codex).
+              // If the backend says the model isn't supported for this account, temporarily
+              // skip it instead of trapping the whole rotation on a permanent 400 loop.
+              const errorData = await res.clone().json().catch(() => ({})) as any
+              const message =
+                (typeof errorData?.detail === 'string' && errorData.detail) ||
+                (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
+                (typeof errorData?.message === 'string' && errorData.message) ||
+                ''
+
+              const isModelUnsupported =
+                typeof message === 'string' &&
+                message.toLowerCase().includes('model is not supported') &&
+                message.toLowerCase().includes('chatgpt account')
+
+              if (isModelUnsupported) {
+                markModelUnsupported(account.alias, pluginConfig.modelUnsupportedCooldownMs, {
+                  model: normalizedModel,
+                  error: message
+                })
+
+                const retryRotation = await getNextAccount(pluginConfig)
+                if (retryRotation && retryRotation.account.alias !== account.alias) {
+                  return customFetch(input, init)
+                }
+
+                return new Response(
+                  JSON.stringify({
+                    error: {
+                      message: `[multi-auth] Model not supported on all accounts. ${message}`.trim()
+                    }
+                  }),
+                  { status: 400, headers: { 'Content-Type': 'application/json' } }
+                )
+              }
             }
 
             if (!res.ok) {
