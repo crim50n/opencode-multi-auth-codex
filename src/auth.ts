@@ -221,10 +221,23 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
       })
     })
 
-    if (!tokenRes.ok) {
-      console.error(`[multi-auth] Refresh failed for ${alias}: ${tokenRes.status}`)
-      return null
-    }
+	    if (!tokenRes.ok) {
+	      console.error(`[multi-auth] Refresh failed for ${alias}: ${tokenRes.status}`)
+
+	      // If the refresh token is invalid/expired, mark this account invalid so
+	      // rotation can keep working without repeatedly selecting a broken account.
+	      if (tokenRes.status === 401 || tokenRes.status === 403) {
+	        try {
+	          updateAccount(alias, {
+	            authInvalid: true,
+	            authInvalidatedAt: Date.now()
+	          })
+	        } catch {
+	          // ignore
+	        }
+	      }
+	      return null
+	    }
 
     const tokens = (await tokenRes.json()) as TokenResponse
     const accessClaims = decodeJwtPayload(tokens.access_token)
