@@ -13,6 +13,12 @@ export interface AccountCredentials {
   lastUsed?: number
   usageCount: number
   rateLimitedUntil?: number // If hit rate limit, when it resets
+  // Some accounts don't have access to a given Codex model yet (staged rollout).
+  // We temporarily skip them instead of hard-invalidating the account.
+  modelUnsupportedUntil?: number
+  modelUnsupportedAt?: number
+  modelUnsupportedModel?: string
+  modelUnsupportedError?: string
   authInvalid?: boolean
   authInvalidatedAt?: number
   rateLimits?: AccountRateLimits
@@ -73,6 +79,7 @@ export interface PluginConfig {
   rotationStrategy: 'round-robin' | 'least-used' | 'random'
   autoRefreshTokens: boolean
   rateLimitCooldownMs: number // How long to skip rate-limited accounts
+  modelUnsupportedCooldownMs: number // How long to skip accounts that don't support the requested model
   modelFilter: RegExp // Which models to expose
 }
 
@@ -100,5 +107,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   rotationStrategy: 'round-robin',
   autoRefreshTokens: true,
   rateLimitCooldownMs: 5 * 60 * 1000, // 5 minutes
+  modelUnsupportedCooldownMs: 30 * 60 * 1000, // 30 minutes
   modelFilter: /^gpt-5/
 }

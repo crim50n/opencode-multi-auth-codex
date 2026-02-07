@@ -12,6 +12,10 @@ export interface AccountCredentials {
     lastUsed?: number;
     usageCount: number;
     rateLimitedUntil?: number;
+    modelUnsupportedUntil?: number;
+    modelUnsupportedAt?: number;
+    modelUnsupportedModel?: string;
+    modelUnsupportedError?: string;
     authInvalid?: boolean;
     authInvalidatedAt?: number;
     rateLimits?: AccountRateLimits;
@@ -61,6 +65,7 @@ export interface PluginConfig {
     rotationStrategy: 'round-robin' | 'least-used' | 'random';
     autoRefreshTokens: boolean;
     rateLimitCooldownMs: number;
+    modelUnsupportedCooldownMs: number;
     modelFilter: RegExp;
 }
 export interface ProviderModel {

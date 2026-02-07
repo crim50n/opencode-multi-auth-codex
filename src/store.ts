@@ -2,10 +2,30 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as crypto from 'node:crypto'
-import type { AccountStore, AccountCredentials, RateLimitHistoryEntry, RateLimitSnapshot } from './types.js'
+import type {
+  AccountStore,
+  AccountCredentials,
+  RateLimitHistoryEntry,
+  RateLimitSnapshot
+} from './types.js'
 
-const STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth')
-const STORE_FILE = path.join(STORE_DIR, 'accounts.json')
+const STORE_DIR_ENV = 'OPENCODE_MULTI_AUTH_STORE_DIR'
+const STORE_FILE_ENV = 'OPENCODE_MULTI_AUTH_STORE_FILE'
+const DEFAULT_STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth')
+const DEFAULT_STORE_FILE = 'accounts.json'
+
+function getStoreDir(): string {
+  const override = process.env[STORE_DIR_ENV]
+  if (override && override.trim()) return path.resolve(override.trim())
+  return DEFAULT_STORE_DIR
+}
+
+function getStoreFile(): string {
+  const override = process.env[STORE_FILE_ENV]
+  if (override && override.trim()) return path.resolve(override.trim())
+  return path.join(getStoreDir(), DEFAULT_STORE_FILE)
+}
+
 const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE'
 const STORE_VERSION = 1
 
@@ -23,8 +43,9 @@ let lastStoreError: string | null = null
 let lastStoreEncrypted = false
 
 function ensureDir(): void {
-  if (!fs.existsSync(STORE_DIR)) {
-    fs.mkdirSync(STORE_DIR, { recursive: true, mode: 0o700 })
+  const dir = getStoreDir()
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
 }
 
@@ -128,9 +149,10 @@ export function loadStore(): AccountStore {
   lastStoreError = null
   lastStoreEncrypted = false
   ensureDir()
-  if (fs.existsSync(STORE_FILE)) {
+  const file = getStoreFile()
+  if (fs.existsSync(file)) {
     try {
-      const data = fs.readFileSync(STORE_FILE, 'utf-8')
+      const data = fs.readFileSync(file, 'utf-8')
       const parsed = JSON.parse(data)
       if (isEncryptedFile(parsed)) {
         lastStoreEncrypted = true
@@ -166,21 +188,22 @@ export function saveStore(store: AccountStore): void {
     return
   }
 
+  const file = getStoreFile()
   const passphrase = getPassphrase()
   const payload = passphrase ? encryptStore(store, passphrase) : store
   const json = JSON.stringify(payload, null, 2)
 
   // Best-effort backup to help recover from crashes/corruption.
   try {
-    if (fs.existsSync(STORE_FILE)) {
-      fs.copyFileSync(STORE_FILE, `${STORE_FILE}.bak`)
-      fs.chmodSync(`${STORE_FILE}.bak`, 0o600)
+    if (fs.existsSync(file)) {
+      fs.copyFileSync(file, `${file}.bak`)
+      fs.chmodSync(`${file}.bak`, 0o600)
     }
   } catch {
     // ignore backup failures
   }
 
-  const tmp = `${STORE_FILE}.tmp-${process.pid}-${Date.now()}`
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`
   let fd: number | null = null
 
   try {
@@ -202,16 +225,16 @@ export function saveStore(store: AccountStore): void {
   }
 
   try {
-    fs.renameSync(tmp, STORE_FILE)
+    fs.renameSync(tmp, file)
   } catch (err: any) {
     // Windows can fail to rename over an existing file.
     if (err?.code === 'EPERM' || err?.code === 'EEXIST') {
       try {
-        fs.unlinkSync(STORE_FILE)
+        fs.unlinkSync(file)
       } catch {
         // ignore
       }
-      fs.renameSync(tmp, STORE_FILE)
+      fs.renameSync(tmp, file)
     } else {
       try {
         fs.unlinkSync(tmp)
@@ -223,9 +246,25 @@ export function saveStore(store: AccountStore): void {
   }
 
   try {
-    fs.chmodSync(STORE_FILE, 0o600)
+    fs.chmodSync(file, 0o600)
   } catch {
     // ignore
+  }
+}
+
+export function getStoreDiagnostics(): {
+  storeDir: string
+  storeFile: string
+  locked: boolean
+  encrypted: boolean
+  error: string | null
+} {
+  return {
+    storeDir: getStoreDir(),
+    storeFile: getStoreFile(),
+    locked: storeLocked,
+    encrypted: lastStoreEncrypted,
+    error: lastStoreError
   }
 }
 
@@ -319,9 +358,10 @@ export function listAccounts(): AccountCredentials[] {
 }
 
 export function getStorePath(): string {
-  return STORE_FILE
+  return getStoreFile()
 }
 
 export function getStoreStatus(): { locked: boolean; encrypted: boolean; error: string | null } {
-  return { locked: storeLocked, encrypted: lastStoreEncrypted, error: lastStoreError }
+  const diag = getStoreDiagnostics()
+  return { locked: diag.locked, encrypted: diag.encrypted, error: diag.error }
 }
