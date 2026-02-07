@@ -518,11 +518,10 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                         model: normalizedModel,
                         store: false
                     };
-                    // Prevent hard failures when a long-running session grows beyond the
-                    // model context window. OpenAI Responses API supports truncation=auto
-                    // which drops older items rather than throwing context_length_exceeded.
+                    // Note: The ChatGPT Codex backend does not currently accept
+                    // `truncation`. Keep this opt-in and default off.
                     if (payload.truncation === undefined) {
-                        const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || 'auto').trim();
+                        const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || '').trim();
                         if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
                             payload.truncation = truncationRaw;
                         }
