@@ -441,13 +441,16 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
             }
         },
         config: async (config) => {
+            const injectModelsRaw = process.env.OPENCODE_MULTI_AUTH_INJECT_MODELS;
+            const injectModels = injectModelsRaw === '1' || injectModelsRaw === 'true';
+            if (!injectModels)
+                return;
             const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
             try {
                 const openai = config.provider?.[PROVIDER_ID] || null;
                 if (!openai || typeof openai !== 'object')
                     return;
                 openai.models ||= {};
-                openai.whitelist ||= [];
                 if (!openai.models[latestModel]) {
                     openai.models[latestModel] = {
                         id: latestModel,
@@ -456,13 +459,12 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                         tool_call: true,
                         temperature: true,
                         limit: {
-                            context: 400000,
-                            output: 128000
+                            // Be conservative: upstream model metadata changes over time and
+                            // incorrect limits prevent OpenCode's compaction from triggering.
+                            context: 200000,
+                            output: 8192
                         }
                     };
-                }
-                if (Array.isArray(openai.whitelist) && !openai.whitelist.includes(latestModel)) {
-                    openai.whitelist.push(latestModel);
                 }
                 if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
                     console.log(`[multi-auth] injected ${latestModel} into runtime config`);
@@ -516,6 +518,15 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                         model: normalizedModel,
                         store: false
                     };
+                    // Prevent hard failures when a long-running session grows beyond the
+                    // model context window. OpenAI Responses API supports truncation=auto
+                    // which drops older items rather than throwing context_length_exceeded.
+                    if (payload.truncation === undefined) {
+                        const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || 'auto').trim();
+                        if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
+                            payload.truncation = truncationRaw;
+                        }
+                    }
                     if (payload.input) {
                         payload.input = filterInput(payload.input);
                     }

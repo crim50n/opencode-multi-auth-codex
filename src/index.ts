@@ -484,37 +484,38 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
         lastStatusBySession.set(sessionID, 'idle')
       }
-    },
-    config: async (config) => {
-      const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim()
-      try {
-        const openai = (config.provider?.[PROVIDER_ID] as any) || null
-        if (!openai || typeof openai !== 'object') return
-        openai.models ||= {}
-        openai.whitelist ||= []
+	    },
+	    config: async (config) => {
+	      const injectModelsRaw = process.env.OPENCODE_MULTI_AUTH_INJECT_MODELS
+	      const injectModels = injectModelsRaw === '1' || injectModelsRaw === 'true'
+	      if (!injectModels) return
 
-        if (!openai.models[latestModel]) {
-          openai.models[latestModel] = {
-            id: latestModel,
-            name: 'GPT-5.3 Codex',
-            reasoning: true,
-            tool_call: true,
-            temperature: true,
-            limit: {
-              context: 400000,
-              output: 128000
-            }
-          }
-        }
+	      const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim()
+	      try {
+	        const openai = (config.provider?.[PROVIDER_ID] as any) || null
+	        if (!openai || typeof openai !== 'object') return
+	        openai.models ||= {}
 
-        if (Array.isArray(openai.whitelist) && !openai.whitelist.includes(latestModel)) {
-          openai.whitelist.push(latestModel)
-        }
+	        if (!openai.models[latestModel]) {
+	          openai.models[latestModel] = {
+	            id: latestModel,
+	            name: 'GPT-5.3 Codex',
+	            reasoning: true,
+	            tool_call: true,
+	            temperature: true,
+	            limit: {
+	              // Be conservative: upstream model metadata changes over time and
+	              // incorrect limits prevent OpenCode's compaction from triggering.
+	              context: 200000,
+	              output: 8192
+	            }
+	          }
+	        }
 
-        if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
-          console.log(`[multi-auth] injected ${latestModel} into runtime config`)
-        }
-      } catch (err) {
+	        if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+	          console.log(`[multi-auth] injected ${latestModel} into runtime config`)
+	        }
+	      } catch (err) {
         if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
           console.log('[multi-auth] config injection failed:', err)
         }
@@ -575,11 +576,21 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
           const normalizedModel = normalizeModel(body.model)
           const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/)
 
-          const payload: Record<string, any> = {
-            ...body,
-            model: normalizedModel,
-            store: false
-          }
+	          const payload: Record<string, any> = {
+	            ...body,
+	            model: normalizedModel,
+	            store: false
+	          }
+
+	          // Prevent hard failures when a long-running session grows beyond the
+	          // model context window. OpenAI Responses API supports truncation=auto
+	          // which drops older items rather than throwing context_length_exceeded.
+	          if (payload.truncation === undefined) {
+	            const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || 'auto').trim()
+	            if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
+	              payload.truncation = truncationRaw
+	            }
+	          }
 
           if (payload.input) {
             payload.input = filterInput(payload.input)
