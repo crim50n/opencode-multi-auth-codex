@@ -10,7 +10,7 @@ const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml')
 
 const DEFAULT_PROMPT = 'Reply ONLY with OK. Do not run any commands.'
 const EXEC_TIMEOUT_MS = 120_000
-const PROBE_FALLBACK_MODELS = ['gpt-5.2-codex']
+const DEFAULT_PROBE_MODELS = ['gpt-5-codex', 'gpt-5.2-codex', 'gpt-5.3-codex']
 
 export interface ProbeResult {
   rateLimits?: AccountRateLimits
@@ -70,6 +70,17 @@ function shouldRetryWithFallback(error?: string): boolean {
     text.includes('requested model') ||
     text.includes('does not exist')
   )
+}
+
+function getProbeModels(): string[] {
+  const raw = (process.env.OPENCODE_MULTI_AUTH_LIMITS_PROBE_MODELS || '').trim()
+  const fromEnv = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  const candidates = fromEnv.length > 0 ? fromEnv : DEFAULT_PROBE_MODELS
+  return Array.from(new Set(candidates))
 }
 
 async function runCodexExec(
@@ -136,8 +147,9 @@ export async function probeRateLimitsForAccount(account: AccountCredentials): Pr
   copyConfigToml(codexHome)
 
   const sessionsDir = path.join(codexHome, 'sessions')
-  const probeModels = [undefined, ...PROBE_FALLBACK_MODELS]
+  const probeModels = getProbeModels()
   let lastError = 'No token_count events found in alias sessions'
+  const attemptErrors: string[] = []
 
   for (let idx = 0; idx < probeModels.length; idx++) {
     const probeModel = probeModels[idx]
@@ -158,11 +170,16 @@ export async function probeRateLimitsForAccount(account: AccountCredentials): Pr
 
     if (execResult.error) {
       lastError = execResult.error
+      attemptErrors.push(`[model=${probeModel}] ${execResult.error}`)
     }
 
     const hasNext = idx < probeModels.length - 1
     if (!hasNext) break
     if (!shouldRetryWithFallback(execResult.error)) break
+  }
+
+  if (attemptErrors.length > 0) {
+    return { error: attemptErrors[attemptErrors.length - 1] }
   }
 
   return { error: lastError }

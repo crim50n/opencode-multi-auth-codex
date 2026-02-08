@@ -7,7 +7,7 @@ const CODEX_HOME_ROOT = path.join(os.homedir(), '.codex-multi');
 const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml');
 const DEFAULT_PROMPT = 'Reply ONLY with OK. Do not run any commands.';
 const EXEC_TIMEOUT_MS = 120_000;
-const PROBE_FALLBACK_MODELS = ['gpt-5.2-codex'];
+const DEFAULT_PROBE_MODELS = ['gpt-5-codex', 'gpt-5.2-codex', 'gpt-5.3-codex'];
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -55,6 +55,15 @@ function shouldRetryWithFallback(error) {
         text.includes('model is not supported') ||
         text.includes('requested model') ||
         text.includes('does not exist'));
+}
+function getProbeModels() {
+    const raw = (process.env.OPENCODE_MULTI_AUTH_LIMITS_PROBE_MODELS || '').trim();
+    const fromEnv = raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    const candidates = fromEnv.length > 0 ? fromEnv : DEFAULT_PROBE_MODELS;
+    return Array.from(new Set(candidates));
 }
 async function runCodexExec(codexHome, model) {
     return new Promise((resolve) => {
@@ -112,8 +121,9 @@ export async function probeRateLimitsForAccount(account) {
     writeAuthJson(codexHome, account);
     copyConfigToml(codexHome);
     const sessionsDir = path.join(codexHome, 'sessions');
-    const probeModels = [undefined, ...PROBE_FALLBACK_MODELS];
+    const probeModels = getProbeModels();
     let lastError = 'No token_count events found in alias sessions';
+    const attemptErrors = [];
     for (let idx = 0; idx < probeModels.length; idx++) {
         const probeModel = probeModels[idx];
         const startedAt = Date.now();
@@ -131,12 +141,16 @@ export async function probeRateLimitsForAccount(account) {
         }
         if (execResult.error) {
             lastError = execResult.error;
+            attemptErrors.push(`[model=${probeModel}] ${execResult.error}`);
         }
         const hasNext = idx < probeModels.length - 1;
         if (!hasNext)
             break;
         if (!shouldRetryWithFallback(execResult.error))
             break;
+    }
+    if (attemptErrors.length > 0) {
+        return { error: attemptErrors[attemptErrors.length - 1] };
     }
     return { error: lastError };
 }
