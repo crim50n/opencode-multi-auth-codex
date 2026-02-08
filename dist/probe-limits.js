@@ -7,6 +7,7 @@ const CODEX_HOME_ROOT = path.join(os.homedir(), '.codex-multi');
 const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml');
 const DEFAULT_PROMPT = 'Reply ONLY with OK. Do not run any commands.';
 const EXEC_TIMEOUT_MS = 120_000;
+const PROBE_FALLBACK_MODELS = ['gpt-5.2-codex'];
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -46,7 +47,16 @@ function copyConfigToml(dir) {
         // ignore config copy errors
     }
 }
-async function runCodexExec(codexHome) {
+function shouldRetryWithFallback(error) {
+    if (!error)
+        return false;
+    const text = error.toLowerCase();
+    return (text.includes('model_not_found') ||
+        text.includes('model is not supported') ||
+        text.includes('requested model') ||
+        text.includes('does not exist'));
+}
+async function runCodexExec(codexHome, model) {
     return new Promise((resolve) => {
         const args = [
             'exec',
@@ -54,9 +64,12 @@ async function runCodexExec(codexHome) {
             '--cd',
             codexHome,
             '--sandbox',
-            'read-only',
-            DEFAULT_PROMPT
+            'read-only'
         ];
+        if (model) {
+            args.push('-m', model);
+        }
+        args.push(DEFAULT_PROMPT);
         let stderr = '';
         let stdout = '';
         const child = spawn('codex', args, {
@@ -98,21 +111,34 @@ export async function probeRateLimitsForAccount(account) {
     ensureDir(codexHome);
     writeAuthJson(codexHome, account);
     copyConfigToml(codexHome);
-    const startedAt = Date.now();
-    const execResult = await runCodexExec(codexHome);
     const sessionsDir = path.join(codexHome, 'sessions');
-    const latest = findLatestSessionRateLimits({
-        sessionsDir,
-        sinceMs: startedAt - 5_000
-    });
-    if (latest?.rateLimits) {
-        return {
-            rateLimits: latest.rateLimits,
-            eventTs: latest.eventTs,
-            sourceFile: latest.sourceFile
-        };
+    const probeModels = [undefined, ...PROBE_FALLBACK_MODELS];
+    let lastError = 'No token_count events found in alias sessions';
+    for (let idx = 0; idx < probeModels.length; idx++) {
+        const probeModel = probeModels[idx];
+        const startedAt = Date.now();
+        const execResult = await runCodexExec(codexHome, probeModel);
+        const latest = findLatestSessionRateLimits({
+            sessionsDir,
+            sinceMs: startedAt - 5_000
+        });
+        if (latest?.rateLimits) {
+            return {
+                rateLimits: latest.rateLimits,
+                eventTs: latest.eventTs,
+                sourceFile: latest.sourceFile
+            };
+        }
+        if (execResult.error) {
+            lastError = execResult.error;
+        }
+        const hasNext = idx < probeModels.length - 1;
+        if (!hasNext)
+            break;
+        if (!shouldRetryWithFallback(execResult.error))
+            break;
     }
-    return { error: execResult.error || 'No token_count events found in alias sessions' };
+    return { error: lastError };
 }
 export function getProbeHomeRoot() {
     return CODEX_HOME_ROOT;
