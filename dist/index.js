@@ -601,7 +601,8 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                         if (res.status === 402) {
                             // Some accounts can temporarily be in a deactivated workspace state.
                             // Rotate to the next account instead of hard-failing the request.
-                            const errorData = await res.clone().json().catch(() => ({}));
+                            const errorData = await res.clone().json().catch(() => null);
+                            const errorText = await res.clone().text().catch(() => '');
                             const code = (typeof errorData?.detail?.code === 'string' && errorData.detail.code) ||
                                 (typeof errorData?.error?.code === 'string' && errorData.error.code) ||
                                 '';
@@ -609,6 +610,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                                 (typeof errorData?.detail === 'string' && errorData.detail) ||
                                 (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
                                 (typeof errorData?.message === 'string' && errorData.message) ||
+                                errorText ||
                                 '';
                             const isDeactivatedWorkspace = code === 'deactivated_workspace' ||
                                 message.toLowerCase().includes('deactivated_workspace') ||
