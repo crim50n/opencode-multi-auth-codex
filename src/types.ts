@@ -19,6 +19,11 @@ export interface AccountCredentials {
   modelUnsupportedAt?: number
   modelUnsupportedModel?: string
   modelUnsupportedError?: string
+  // Some ChatGPT accounts can be in a deactivated workspace state (402 Payment Required,
+  // detail.code = "deactivated_workspace"). Treat this as a temporary block and rotate.
+  workspaceDeactivatedUntil?: number
+  workspaceDeactivatedAt?: number
+  workspaceDeactivatedError?: string
   authInvalid?: boolean
   authInvalidatedAt?: number
   rateLimits?: AccountRateLimits
@@ -80,6 +85,7 @@ export interface PluginConfig {
   autoRefreshTokens: boolean
   rateLimitCooldownMs: number // How long to skip rate-limited accounts
   modelUnsupportedCooldownMs: number // How long to skip accounts that don't support the requested model
+  workspaceDeactivatedCooldownMs: number // How long to skip accounts with deactivated workspaces
   modelFilter: RegExp // Which models to expose
 }
 
@@ -108,5 +114,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   autoRefreshTokens: true,
   rateLimitCooldownMs: 5 * 60 * 1000, // 5 minutes
   modelUnsupportedCooldownMs: 30 * 60 * 1000, // 30 minutes
+  workspaceDeactivatedCooldownMs: 30 * 60 * 1000, // 30 minutes
   modelFilter: /^gpt-5/
 }

@@ -16,6 +16,9 @@ export interface AccountCredentials {
     modelUnsupportedAt?: number;
     modelUnsupportedModel?: string;
     modelUnsupportedError?: string;
+    workspaceDeactivatedUntil?: number;
+    workspaceDeactivatedAt?: number;
+    workspaceDeactivatedError?: string;
     authInvalid?: boolean;
     authInvalidatedAt?: number;
     rateLimits?: AccountRateLimits;
@@ -66,6 +69,7 @@ export interface PluginConfig {
     autoRefreshTokens: boolean;
     rateLimitCooldownMs: number;
     modelUnsupportedCooldownMs: number;
+    workspaceDeactivatedCooldownMs: number;
     modelFilter: RegExp;
 }
 export interface ProviderModel {

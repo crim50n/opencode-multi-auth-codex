@@ -3,7 +3,13 @@ import fs from 'node:fs'
 import { syncAuthFromOpenCode } from './auth-sync.js'
 import { createAuthorizationFlow, loginAccount } from './auth.js'
 import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
-import { getNextAccount, markAuthInvalid, markModelUnsupported, markRateLimited } from './rotation.js'
+import {
+  getNextAccount,
+  markAuthInvalid,
+  markModelUnsupported,
+  markRateLimited,
+  markWorkspaceDeactivated
+} from './rotation.js'
 import { listAccounts, updateAccount } from './store.js'
 import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
@@ -680,6 +686,47 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                 }),
                 { status: 429, headers: { 'Content-Type': 'application/json' } }
               )
+            }
+
+            if (res.status === 402) {
+              // Some accounts can temporarily be in a deactivated workspace state.
+              // Rotate to the next account instead of hard-failing the request.
+              const errorData = await res.clone().json().catch(() => ({})) as any
+              const code =
+                (typeof errorData?.detail?.code === 'string' && errorData.detail.code) ||
+                (typeof errorData?.error?.code === 'string' && errorData.error.code) ||
+                ''
+              const message =
+                (typeof errorData?.detail?.message === 'string' && errorData.detail.message) ||
+                (typeof errorData?.detail === 'string' && errorData.detail) ||
+                (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
+                (typeof errorData?.message === 'string' && errorData.message) ||
+                ''
+
+              const isDeactivatedWorkspace =
+                code === 'deactivated_workspace' ||
+                message.toLowerCase().includes('deactivated_workspace') ||
+                message.toLowerCase().includes('deactivated workspace')
+
+              if (isDeactivatedWorkspace) {
+                markWorkspaceDeactivated(account.alias, pluginConfig.workspaceDeactivatedCooldownMs, {
+                  error: message || code
+                })
+
+                const retryRotation = await getNextAccount(pluginConfig)
+                if (retryRotation && retryRotation.account.alias !== account.alias) {
+                  return customFetch(input, init)
+                }
+
+                return new Response(
+                  JSON.stringify({
+                    error: {
+                      message: `[multi-auth][acc=${account.alias}] Workspace deactivated on all accounts. ${message || code}`.trim()
+                    }
+                  }),
+                  { status: 402, headers: { 'Content-Type': 'application/json' } }
+                )
+              }
             }
 
             if (res.status === 400) {

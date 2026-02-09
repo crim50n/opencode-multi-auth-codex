@@ -11,6 +11,10 @@ export declare function markModelUnsupported(alias: string, cooldownMs: number, 
     error?: string;
 }): void;
 export declare function clearModelUnsupported(alias: string): void;
+export declare function markWorkspaceDeactivated(alias: string, cooldownMs: number, info?: {
+    error?: string;
+}): void;
+export declare function clearWorkspaceDeactivated(alias: string): void;
 export declare function markAuthInvalid(alias: string): void;
 export declare function clearAuthInvalid(alias: string): void;
 //# sourceMappingURL=rotation.d.ts.map

@@ -40,8 +40,10 @@ export async function getNextAccount(
     const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now
     const notModelUnsupported =
       !acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now
+    const notWorkspaceDeactivated =
+      !acc.workspaceDeactivatedUntil || acc.workspaceDeactivatedUntil < now
     const notInvalidated = !acc.authInvalid
-    return notRateLimited && notModelUnsupported && notInvalidated
+    return notRateLimited && notModelUnsupported && notWorkspaceDeactivated && notInvalidated
   })
 
   if (availableAliases.length === 0) {
@@ -160,6 +162,29 @@ export function clearModelUnsupported(alias: string): void {
     modelUnsupportedAt: undefined,
     modelUnsupportedModel: undefined,
     modelUnsupportedError: undefined
+  })
+}
+
+export function markWorkspaceDeactivated(
+  alias: string,
+  cooldownMs: number,
+  info?: { error?: string }
+): void {
+  updateAccount(alias, {
+    workspaceDeactivatedUntil: Date.now() + cooldownMs,
+    workspaceDeactivatedAt: Date.now(),
+    workspaceDeactivatedError: info?.error
+  })
+  console.warn(
+    `[multi-auth] Account ${alias} marked workspace-deactivated for ${cooldownMs / 1000}s`
+  )
+}
+
+export function clearWorkspaceDeactivated(alias: string): void {
+  updateAccount(alias, {
+    workspaceDeactivatedUntil: undefined,
+    workspaceDeactivatedAt: undefined,
+    workspaceDeactivatedError: undefined
   })
 }
 

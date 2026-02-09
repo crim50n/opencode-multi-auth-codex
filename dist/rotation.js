@@ -25,8 +25,9 @@ export async function getNextAccount(config) {
         const acc = store.accounts[alias];
         const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now;
         const notModelUnsupported = !acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now;
+        const notWorkspaceDeactivated = !acc.workspaceDeactivatedUntil || acc.workspaceDeactivatedUntil < now;
         const notInvalidated = !acc.authInvalid;
-        return notRateLimited && notModelUnsupported && notInvalidated;
+        return notRateLimited && notModelUnsupported && notWorkspaceDeactivated && notInvalidated;
     });
     if (availableAliases.length === 0) {
         console.warn('[multi-auth] No available accounts (rate-limited or invalidated).');
@@ -128,6 +129,21 @@ export function clearModelUnsupported(alias) {
         modelUnsupportedAt: undefined,
         modelUnsupportedModel: undefined,
         modelUnsupportedError: undefined
+    });
+}
+export function markWorkspaceDeactivated(alias, cooldownMs, info) {
+    updateAccount(alias, {
+        workspaceDeactivatedUntil: Date.now() + cooldownMs,
+        workspaceDeactivatedAt: Date.now(),
+        workspaceDeactivatedError: info?.error
+    });
+    console.warn(`[multi-auth] Account ${alias} marked workspace-deactivated for ${cooldownMs / 1000}s`);
+}
+export function clearWorkspaceDeactivated(alias) {
+    updateAccount(alias, {
+        workspaceDeactivatedUntil: undefined,
+        workspaceDeactivatedAt: undefined,
+        workspaceDeactivatedError: undefined
     });
 }
 export function markAuthInvalid(alias) {
