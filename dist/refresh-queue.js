@@ -1,5 +1,5 @@
 import { refreshRateLimitsForAccount } from './limits-refresh.js';
-import { updateAccount } from './store.js';
+import { updateAccountByAlias } from './store.js';
 import { logInfo, logWarn } from './logger.js';
 let queueState = null;
 let stopRequested = false;
@@ -19,7 +19,7 @@ async function runQueue(targets) {
         if (!queueState)
             return;
         if (stopRequested) {
-            updateAccount(account.alias, { limitStatus: 'stopped', limitError: 'Stopped by user' });
+            updateAccountByAlias(account.alias, { limitStatus: 'stopped', limitError: 'Stopped by user' });
             queueState.results.push({ alias: account.alias, updated: false, error: 'Stopped' });
             queueState.completed += 1;
             continue;
@@ -69,7 +69,7 @@ export function startRefreshQueue(accounts, alias) {
         return queueState;
     }
     for (const account of targets) {
-        updateAccount(account.alias, { limitStatus: 'queued', limitError: undefined });
+        updateAccountByAlias(account.alias, { limitStatus: 'queued', limitError: undefined });
     }
     logInfo(`Limit refresh queue started (${targets.length} accounts)`);
     void runQueue(targets);

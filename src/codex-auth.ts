@@ -1,8 +1,8 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { addAccount, loadStore, setActiveAlias, updateAccount } from './store.js'
-import type { AccountCredentials } from './types.js'
+import { addAccount, findIndexByEmail, findIndexByToken, loadStore, setActiveIndex, updateAccount } from './store.js'
+import type { AccountCredentials, StoredAccount } from './types.js'
 
 export interface CodexAuthTokens {
   id_token: string
@@ -91,38 +91,10 @@ function fingerprintTokens(tokens: CodexAuthTokens): string {
   return `${tokens.access_token}:${tokens.refresh_token}:${tokens.id_token}`
 }
 
-function buildAlias(email: string | undefined, accountId: string | undefined, store: ReturnType<typeof loadStore>): string {
-  const base = email?.split('@')[0] || accountId?.slice(0, 8) || `account-${Date.now()}`
-  const existing = new Set(Object.keys(store.accounts))
-  let candidate = base || `account-${Date.now()}`
-  let suffix = 1
-  while (existing.has(candidate)) {
-    candidate = `${base}-${suffix}`
-    suffix += 1
-  }
-  return candidate
-}
-
-function findMatchingAlias(
-  tokens: CodexAuthTokens,
-  accountId: string | undefined,
-  email: string | undefined,
-  store: ReturnType<typeof loadStore>
-): string | null {
-  for (const account of Object.values(store.accounts)) {
-    if (accountId && account.accountId === accountId) return account.alias
-    if (account.accessToken === tokens.access_token) return account.alias
-    if (account.refreshToken === tokens.refresh_token) return account.alias
-    if (account.idToken === tokens.id_token) return account.alias
-    if (email && account.email === email) return account.alias
-  }
-  return null
-}
-
-export function syncCodexAuthFile(): { alias: string | null; added: boolean; updated: boolean } {
+export function syncCodexAuthFile(): { index: number | null; added: boolean; updated: boolean; alias?: string } {
   const auth = loadCodexAuthFile()
   if (!auth?.tokens?.access_token || !auth.tokens.refresh_token || !auth.tokens.id_token) {
-    return { alias: null, added: false, updated: false }
+    return { index: null, added: false, updated: false }
   }
 
   const fingerprint = fingerprintTokens(auth.tokens)
@@ -133,14 +105,14 @@ export function syncCodexAuthFile(): { alias: string | null; added: boolean; upd
   const accountId = auth.tokens.account_id || getAccountIdFromClaims(idClaims) || getAccountIdFromClaims(accessClaims)
   const expiresAt = getExpiryFromClaims(accessClaims) || getExpiryFromClaims(idClaims) || Date.now()
 
-  const store = loadStore()
-  const now = Date.now()
-  const alias = findMatchingAlias(auth.tokens, accountId, email, store)
-  if (lastFingerprint === fingerprint && alias) {
-    return { alias, added: false, updated: false }
+  // Try to find by token first
+  const tokenIdx = findIndexByToken(auth.tokens.access_token, auth.tokens.refresh_token)
+  if (tokenIdx >= 0 && lastFingerprint === fingerprint) {
+    return { index: tokenIdx, added: false, updated: false }
   }
   lastFingerprint = fingerprint
-  const update: Partial<AccountCredentials> = {
+
+  const update: Partial<StoredAccount> = {
     accessToken: auth.tokens.access_token,
     refreshToken: auth.tokens.refresh_token,
     idToken: auth.tokens.id_token,
@@ -148,20 +120,30 @@ export function syncCodexAuthFile(): { alias: string | null; added: boolean; upd
     expiresAt,
     email,
     lastRefresh: auth.last_refresh,
-    lastSeenAt: now,
+    lastSeenAt: Date.now(),
     source: 'codex'
   }
 
-  if (alias) {
-    updateAccount(alias, update)
-    setActiveAlias(alias)
-    return { alias, added: false, updated: true }
+  if (tokenIdx >= 0) {
+    updateAccount(tokenIdx, update)
+    setActiveIndex(tokenIdx)
+    return { index: tokenIdx, added: false, updated: true }
   }
 
-  const newAlias = buildAlias(email, accountId, store)
-  addAccount(newAlias, update as Omit<AccountCredentials, 'alias' | 'usageCount'>)
-  setActiveAlias(newAlias)
-  return { alias: newAlias, added: true, updated: true }
+  // Try by email
+  if (email) {
+    const emailIdx = findIndexByEmail(email)
+    if (emailIdx >= 0) {
+      updateAccount(emailIdx, update)
+      setActiveIndex(emailIdx)
+      return { index: emailIdx, added: false, updated: true }
+    }
+  }
+
+  // New account — addAccount deduplicates by email
+  const { index: newIndex } = addAccount(update as Omit<StoredAccount, 'usageCount'>)
+  setActiveIndex(newIndex)
+  return { index: newIndex, added: true, updated: true }
 }
 
 export function getCodexAuthStatus(): { error: string | null } {
@@ -169,18 +151,38 @@ export function getCodexAuthStatus(): { error: string | null } {
 }
 
 export function writeCodexAuthForAlias(alias: string): void {
-  const store = loadStore()
-  const account = store.accounts[alias]
+  // Backward compat: accept alias or email or index
+  const accounts = loadStore()
+  let index = -1
 
-  if (!account) {
-    throw new Error(`Unknown alias: ${alias}`)
+  // Try as number index
+  const asNum = Number(alias)
+  if (Number.isInteger(asNum) && asNum >= 0 && asNum < accounts.accounts.length) {
+    index = asNum
+  } else {
+    // Try as email
+    index = accounts.accounts.findIndex((acc) => acc.email === alias)
+    if (index < 0) {
+      // Try as computed alias
+      const computed = accounts.accounts.findIndex((acc) => {
+        const a = acc.email?.split('@')[0]
+        return a === alias
+      })
+      if (computed >= 0) index = computed
+    }
   }
+
+  if (index < 0) {
+    throw new Error(`Unknown account: ${alias}`)
+  }
+
+  const account = accounts.accounts[index]
   if (!account.accessToken || !account.refreshToken || !account.idToken) {
-    throw new Error('Missing token data for alias')
+    throw new Error('Missing token data for account')
   }
 
   const current = loadCodexAuthFile()
-  const auth: CodexAuthFile = {
+  const authFile: CodexAuthFile = {
     OPENAI_API_KEY: current?.OPENAI_API_KEY ?? null,
     tokens: {
       id_token: account.idToken,
@@ -191,10 +193,10 @@ export function writeCodexAuthForAlias(alias: string): void {
     last_refresh: new Date().toISOString()
   }
 
-  writeCodexAuthFile(auth)
-  setActiveAlias(alias)
-  updateAccount(alias, {
-    lastRefresh: auth.last_refresh,
+  writeCodexAuthFile(authFile)
+  setActiveIndex(index)
+  updateAccount(index, {
+    lastRefresh: authFile.last_refresh,
     lastSeenAt: Date.now(),
     source: 'codex'
   })

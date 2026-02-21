@@ -1,4 +1,4 @@
-import { addAccount, loadStore, updateAccount } from './store.js';
+import { addAccount, findIndexByEmail, findIndexByToken, updateAccount } from './store.js';
 import { decodeJwtPayload, getAccountIdFromClaims, getEmailFromClaims } from './codex-auth.js';
 const OPENAI_ISSUER = 'https://auth.openai.com';
 const AUTH_SYNC_COOLDOWN_MS = 10_000;
@@ -17,33 +17,6 @@ async function fetchEmail(accessToken) {
     catch {
         return undefined;
     }
-}
-function findAccountAliasByToken(access, refresh) {
-    const store = loadStore();
-    for (const account of Object.values(store.accounts)) {
-        if (account.accessToken === access)
-            return account.alias;
-        if (refresh && account.refreshToken === refresh)
-            return account.alias;
-    }
-    return null;
-}
-function findAccountAliasByEmail(email, store) {
-    for (const account of Object.values(store.accounts)) {
-        if (account.email && account.email === email)
-            return account.alias;
-    }
-    return null;
-}
-function buildAlias(email, existingAliases) {
-    const base = email ? email.split('@')[0] : 'account';
-    let candidate = base || 'account';
-    let suffix = 1;
-    while (existingAliases.has(candidate)) {
-        candidate = `${base}-${suffix}`;
-        suffix += 1;
-    }
-    return candidate;
 }
 export async function syncAuthFromOpenCode(getAuth) {
     const now = Date.now();
@@ -64,12 +37,13 @@ export async function syncAuthFromOpenCode(getAuth) {
     if (auth.access === lastSyncedAccess)
         return;
     lastSyncedAccess = auth.access;
-    const existingAlias = findAccountAliasByToken(auth.access, auth.refresh);
     const accessClaims = decodeJwtPayload(auth.access);
     const derivedEmail = getEmailFromClaims(accessClaims);
     const derivedAccountId = getAccountIdFromClaims(accessClaims);
-    if (existingAlias) {
-        updateAccount(existingAlias, {
+    // Try to find existing account by token
+    const tokenIdx = findIndexByToken(auth.access, auth.refresh);
+    if (tokenIdx >= 0) {
+        updateAccount(tokenIdx, {
             accessToken: auth.access,
             refreshToken: auth.refresh,
             expiresAt: auth.expires,
@@ -78,12 +52,12 @@ export async function syncAuthFromOpenCode(getAuth) {
         });
         return;
     }
-    const store = loadStore();
+    // Try to find by email
     const email = (await fetchEmail(auth.access)) || derivedEmail;
     if (email) {
-        const existingByEmail = findAccountAliasByEmail(email, store);
-        if (existingByEmail) {
-            updateAccount(existingByEmail, {
+        const emailIdx = findIndexByEmail(email);
+        if (emailIdx >= 0) {
+            updateAccount(emailIdx, {
                 accessToken: auth.access,
                 refreshToken: auth.refresh,
                 expiresAt: auth.expires,
@@ -92,8 +66,8 @@ export async function syncAuthFromOpenCode(getAuth) {
             return;
         }
     }
-    const alias = buildAlias(email, new Set(Object.keys(store.accounts)));
-    addAccount(alias, {
+    // New account — addAccount will dedup by email if needed
+    addAccount({
         accessToken: auth.access,
         refreshToken: auth.refresh,
         expiresAt: auth.expires,

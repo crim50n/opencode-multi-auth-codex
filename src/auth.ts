@@ -4,7 +4,6 @@ import * as http from 'http'
 import * as net from 'node:net'
 import * as url from 'url'
 import { addAccount, updateAccount, loadStore } from './store.js'
-import { clearAuthInvalid } from './rotation.js'
 import {
   decodeJwtPayload,
   getAccountIdFromClaims,
@@ -29,7 +28,7 @@ interface TokenResponse {
   token_type: string
 }
 
-interface AuthorizationFlow {
+export interface AuthorizationFlow {
   pkce: { verifier: string; challenge: string }
   state: string
   url: string
@@ -77,31 +76,11 @@ export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
   return { pkce, state, url: authUrl.toString(), redirectUri, redirectPort }
 }
 
-function normalizeAlias(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-')
-  return normalized.replace(/^-+|-+$/g, '') || 'account'
-}
-
-function resolveAlias(preferredAlias: string | undefined, email: string | undefined): string {
-  const existing = new Set(Object.keys(loadStore().accounts))
-  const source = preferredAlias && preferredAlias.trim().length > 0
-    ? preferredAlias
-    : (email || 'account').split('@')[0]
-  const base = normalizeAlias(source || 'account')
-
-  if (!existing.has(base)) {
-    return base
-  }
-
-  let index = 2
-  while (existing.has(`${base}-${index}`)) {
-    index += 1
-  }
-  return `${base}-${index}`
-}
-
+/**
+ * Login a new account via OAuth. No alias required — accounts are identified by email.
+ * Deduplicates by email automatically (if same email logs in again, updates existing).
+ */
 export async function loginAccount(
-  alias?: string,
   flow?: AuthorizationFlow
 ): Promise<AccountCredentials> {
   const activeFlow = flow ?? await createAuthorizationFlow()
@@ -187,9 +166,8 @@ export async function loginAccount(
           getAccountIdFromClaims(idClaims) ||
           getAccountIdFromClaims(accessClaims)
 
-        const accountAlias = resolveAlias(alias, email)
-
-        const store = addAccount(accountAlias, {
+        // addAccount deduplicates by email automatically
+        const { store, index } = addAccount({
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           idToken: tokens.id_token,
@@ -198,18 +176,25 @@ export async function loginAccount(
           email,
           lastRefresh: new Date(now).toISOString(),
           lastSeenAt: now,
+          addedAt: now,
           source: 'opencode',
           authInvalid: false,
           authInvalidatedAt: undefined
         })
 
-        const account = store.accounts[accountAlias]
+        const stored = store.accounts[index]
+        const displayName = email || `account #${index}`
+        const account: AccountCredentials = {
+          ...stored,
+          alias: email?.split('@')[0] || `account-${index}`,
+          usageCount: stored.usageCount ?? 0
+        }
 
         res.writeHead(200, { 'Content-Type': 'text/html' })
         res.end(`
           <html>
             <body style="font-family: system-ui; padding: 40px; text-align: center;">
-              <h1>Account "${accountAlias}" authenticated!</h1>
+              <h1>Account authenticated!</h1>
               <p>${email || 'Unknown email'}</p>
               <p>You can close this window.</p>
             </body>
@@ -227,9 +212,10 @@ export async function loginAccount(
     })
 
     server.listen(redirectPort, () => {
-      const displayAlias = alias && alias.trim().length > 0 ? alias.trim() : 'auto-generated'
-      console.log(`\n[multi-auth] Login for account "${displayAlias}"`)
-      console.log(`[multi-auth] Open this URL in your browser:\n`)
+      // When called from plugin authorize() with a pre-created flow,
+      // don't print URL again (OpenCode UI already shows it).
+      if (flow) return
+      console.log(`\n[multi-auth] Login — open this URL in your browser:\n`)
       console.log(`  ${activeFlow.url}\n`)
       console.log(`[multi-auth] Waiting for callback on port ${redirectPort}...`)
     })
@@ -250,14 +236,20 @@ export async function loginAccount(
   })
 }
 
-export async function refreshToken(alias: string): Promise<AccountCredentials | null> {
+export async function refreshToken(index: number): Promise<AccountCredentials | null> {
   const store = loadStore()
-  const account = store.accounts[alias]
-
-  if (!account?.refreshToken) {
-    console.error(`[multi-auth] No refresh token for ${alias}`)
+  if (index < 0 || index >= store.accounts.length) {
+    console.error(`[multi-auth] Invalid account index ${index}`)
     return null
   }
+  const account = store.accounts[index]
+
+  if (!account?.refreshToken) {
+    console.error(`[multi-auth] No refresh token for account #${index} (${account?.email || 'unknown'})`)
+    return null
+  }
+
+  const label = account.email || `#${index}`
 
   try {
     const tokenRes = await fetch(TOKEN_URL, {
@@ -270,23 +262,23 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
       })
     })
 
-	    if (!tokenRes.ok) {
-	      console.error(`[multi-auth] Refresh failed for ${alias}: ${tokenRes.status}`)
+    if (!tokenRes.ok) {
+      console.error(`[multi-auth] Refresh failed for ${label}: ${tokenRes.status}`)
 
-	      // If the refresh token is invalid/expired, mark this account invalid so
-	      // rotation can keep working without repeatedly selecting a broken account.
-	      if (tokenRes.status === 401 || tokenRes.status === 403) {
-	        try {
-	          updateAccount(alias, {
-	            authInvalid: true,
-	            authInvalidatedAt: Date.now()
-	          })
-	        } catch {
-	          // ignore
-	        }
-	      }
-	      return null
-	    }
+      // If the refresh token is invalid/expired, mark this account invalid so
+      // rotation can keep working without repeatedly selecting a broken account.
+      if (tokenRes.status === 401 || tokenRes.status === 403) {
+        try {
+          updateAccount(index, {
+            authInvalid: true,
+            authInvalidatedAt: Date.now()
+          })
+        } catch {
+          // ignore
+        }
+      }
+      return null
+    }
 
     const tokens = (await tokenRes.json()) as TokenResponse
     const accessClaims = decodeJwtPayload(tokens.access_token)
@@ -302,30 +294,41 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
       accountId:
         getAccountIdFromClaims(idClaims) ||
         getAccountIdFromClaims(accessClaims) ||
-        account.accountId
+        account.accountId,
+      authInvalid: false,
+      authInvalidatedAt: undefined
     }
 
-    const updatedStore = updateAccount(alias, updates)
-    clearAuthInvalid(alias)
+    const updatedStore = updateAccount(index, updates)
+    const stored = updatedStore.accounts[index]
+    if (!stored) return null
 
-    return updatedStore.accounts[alias]
+    return {
+      ...stored,
+      alias: stored.email?.split('@')[0] || `account-${index}`,
+      usageCount: stored.usageCount ?? 0
+    }
   } catch (err) {
-    console.error(`[multi-auth] Refresh error for ${alias}:`, err)
+    console.error(`[multi-auth] Refresh error for ${label}:`, err)
     return null
   }
 }
 
-export async function ensureValidToken(alias: string): Promise<string | null> {
+export async function ensureValidToken(index: number): Promise<string | null> {
   const store = loadStore()
-  const account = store.accounts[alias]
+  if (index < 0 || index >= store.accounts.length) return null
+  const account = store.accounts[index]
 
   if (!account) return null
 
   // Refresh if expiring within 5 minutes
   const bufferMs = 5 * 60 * 1000
   if (account.expiresAt < Date.now() + bufferMs) {
-    console.log(`[multi-auth] Refreshing token for ${alias}`)
-    const refreshed = await refreshToken(alias)
+    const label = account.email || `#${index}`
+    if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+      console.log(`[multi-auth] Refreshing token for ${label}`)
+    }
+    const refreshed = await refreshToken(index)
     return refreshed?.accessToken || null
   }
 

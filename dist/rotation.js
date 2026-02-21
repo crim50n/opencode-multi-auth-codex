@@ -8,10 +8,16 @@ function shuffled(input) {
     }
     return a;
 }
+function computeAlias(account, index) {
+    if (account.email) {
+        return account.email.split('@')[0] || `account-${index}`;
+    }
+    return `account-${index}`;
+}
 export async function getNextAccount(config) {
     let store = loadStore();
-    const aliases = Object.keys(store.accounts);
-    if (aliases.length === 0) {
+    const accountCount = store.accounts.length;
+    if (accountCount === 0) {
         const diag = getStoreDiagnostics();
         const extra = diag.error ? ` (${diag.error})` : '';
         console.error(`[multi-auth] No accounts configured. Run: opencode-multi-auth add${extra}`);
@@ -21,16 +27,21 @@ export async function getNextAccount(config) {
         return null;
     }
     const now = Date.now();
-    const availableAliases = aliases.filter(alias => {
-        const acc = store.accounts[alias];
+    // Build list of available indices
+    const availableIndices = [];
+    for (let i = 0; i < accountCount; i++) {
+        const acc = store.accounts[i];
         const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now;
         const notModelUnsupported = !acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now;
         const notWorkspaceDeactivated = !acc.workspaceDeactivatedUntil || acc.workspaceDeactivatedUntil < now;
         const notInvalidated = !acc.authInvalid;
-        return notRateLimited && notModelUnsupported && notWorkspaceDeactivated && notInvalidated;
-    });
-    if (availableAliases.length === 0) {
-        console.warn('[multi-auth] No available accounts (rate-limited or invalidated).');
+        const enabled = acc.enabled !== false;
+        if (notRateLimited && notModelUnsupported && notWorkspaceDeactivated && notInvalidated && enabled) {
+            availableIndices.push(i);
+        }
+    }
+    if (availableIndices.length === 0) {
+        console.warn('[multi-auth] No available accounts (rate-limited, disabled, or invalidated).');
         return null;
     }
     const tokenFailureCooldownMs = (() => {
@@ -43,7 +54,7 @@ export async function getNextAccount(config) {
     const buildCandidates = () => {
         switch (config.rotationStrategy) {
             case 'least-used': {
-                const sorted = [...availableAliases].sort((a, b) => {
+                const sorted = [...availableIndices].sort((a, b) => {
                     const aa = store.accounts[a];
                     const bb = store.accounts[b];
                     const usageDiff = (aa?.usageCount || 0) - (bb?.usageCount || 0);
@@ -52,109 +63,126 @@ export async function getNextAccount(config) {
                     const lastDiff = (aa?.lastUsed || 0) - (bb?.lastUsed || 0);
                     if (lastDiff !== 0)
                         return lastDiff;
-                    return a.localeCompare(b);
+                    return a - b;
                 });
-                return { aliases: sorted };
+                return { indices: sorted };
             }
             case 'random': {
-                return { aliases: shuffled(availableAliases) };
+                return { indices: shuffled(availableIndices) };
             }
             case 'round-robin':
             default: {
-                const start = store.rotationIndex % availableAliases.length;
-                const rr = availableAliases.map((_, i) => availableAliases[(start + i) % availableAliases.length]);
-                const nextIndex = (selected) => {
-                    const idx = availableAliases.indexOf(selected);
-                    if (idx < 0)
+                const start = store.rotationIndex % availableIndices.length;
+                const rr = availableIndices.map((_, i) => availableIndices[(start + i) % availableIndices.length]);
+                const nextRotation = (selected) => {
+                    const pos = availableIndices.indexOf(selected);
+                    if (pos < 0)
                         return store.rotationIndex;
-                    return (idx + 1) % availableAliases.length;
+                    return (pos + 1) % availableIndices.length;
                 };
-                return { aliases: rr, nextIndex };
+                return { indices: rr, nextRotation };
             }
         }
     };
-    const { aliases: candidates, nextIndex } = buildCandidates();
-    for (const candidate of candidates) {
-        const token = await ensureValidToken(candidate);
+    const { indices: candidates, nextRotation } = buildCandidates();
+    for (const candidateIdx of candidates) {
+        const token = await ensureValidToken(candidateIdx);
         if (!token) {
             // Don't hard-fail the whole system on a single broken account.
             // Put it on a short cooldown so rotation can keep working.
-            store = updateAccount(candidate, {
+            store = updateAccount(candidateIdx, {
                 rateLimitedUntil: now + tokenFailureCooldownMs,
                 limitError: '[multi-auth] Token unavailable (refresh failed?)',
                 lastLimitErrorAt: now
             });
             continue;
         }
-        store = updateAccount(candidate, {
-            usageCount: (store.accounts[candidate]?.usageCount || 0) + 1,
+        store = updateAccount(candidateIdx, {
+            usageCount: (store.accounts[candidateIdx]?.usageCount || 0) + 1,
             lastUsed: now,
             limitError: undefined
         });
-        store.activeAlias = candidate;
+        store.activeIndex = candidateIdx;
         store.lastRotation = now;
-        if (nextIndex) {
-            store.rotationIndex = nextIndex(candidate);
+        if (nextRotation) {
+            store.rotationIndex = nextRotation(candidateIdx);
         }
         saveStore(store);
-        return { account: store.accounts[candidate], token };
+        const acc = store.accounts[candidateIdx];
+        return {
+            account: {
+                ...acc,
+                alias: computeAlias(acc, candidateIdx),
+                usageCount: acc.usageCount ?? 0
+            },
+            token,
+            index: candidateIdx
+        };
     }
     console.error('[multi-auth] No available accounts (token refresh failed on all candidates).');
     return null;
 }
-export function markRateLimited(alias, cooldownMs) {
-    updateAccount(alias, {
+export function markRateLimited(index, cooldownMs) {
+    const store = loadStore();
+    const label = store.accounts[index]?.email || `#${index}`;
+    updateAccount(index, {
         rateLimitedUntil: Date.now() + cooldownMs
     });
-    console.warn(`[multi-auth] Account ${alias} marked rate-limited for ${cooldownMs / 1000}s`);
+    console.warn(`[multi-auth] Account ${label} marked rate-limited for ${cooldownMs / 1000}s`);
 }
-export function clearRateLimit(alias) {
-    updateAccount(alias, {
+export function clearRateLimit(index) {
+    updateAccount(index, {
         rateLimitedUntil: undefined
     });
 }
-export function markModelUnsupported(alias, cooldownMs, info) {
-    updateAccount(alias, {
+export function markModelUnsupported(index, cooldownMs, info) {
+    const store = loadStore();
+    const label = store.accounts[index]?.email || `#${index}`;
+    updateAccount(index, {
         modelUnsupportedUntil: Date.now() + cooldownMs,
         modelUnsupportedAt: Date.now(),
         modelUnsupportedModel: info?.model,
         modelUnsupportedError: info?.error
     });
     const extra = info?.model ? ` (model=${info.model})` : '';
-    console.warn(`[multi-auth] Account ${alias} marked model-unsupported for ${cooldownMs / 1000}s${extra}`);
+    console.warn(`[multi-auth] Account ${label} marked model-unsupported for ${cooldownMs / 1000}s${extra}`);
 }
-export function clearModelUnsupported(alias) {
-    updateAccount(alias, {
+export function clearModelUnsupported(index) {
+    updateAccount(index, {
         modelUnsupportedUntil: undefined,
         modelUnsupportedAt: undefined,
         modelUnsupportedModel: undefined,
         modelUnsupportedError: undefined
     });
 }
-export function markWorkspaceDeactivated(alias, cooldownMs, info) {
-    updateAccount(alias, {
+export function markWorkspaceDeactivated(index, cooldownMs, info) {
+    const store = loadStore();
+    const label = store.accounts[index]?.email || `#${index}`;
+    updateAccount(index, {
         workspaceDeactivatedUntil: Date.now() + cooldownMs,
         workspaceDeactivatedAt: Date.now(),
         workspaceDeactivatedError: info?.error
     });
-    console.warn(`[multi-auth] Account ${alias} marked workspace-deactivated for ${cooldownMs / 1000}s`);
+    console.warn(`[multi-auth] Account ${label} marked workspace-deactivated for ${cooldownMs / 1000}s`);
 }
-export function clearWorkspaceDeactivated(alias) {
-    updateAccount(alias, {
+export function clearWorkspaceDeactivated(index) {
+    updateAccount(index, {
         workspaceDeactivatedUntil: undefined,
         workspaceDeactivatedAt: undefined,
         workspaceDeactivatedError: undefined
     });
 }
-export function markAuthInvalid(alias) {
-    updateAccount(alias, {
+export function markAuthInvalid(index) {
+    const store = loadStore();
+    const label = store.accounts[index]?.email || `#${index}`;
+    updateAccount(index, {
         authInvalid: true,
         authInvalidatedAt: Date.now()
     });
-    console.warn(`[multi-auth] Account ${alias} marked invalidated`);
+    console.warn(`[multi-auth] Account ${label} marked invalidated`);
 }
-export function clearAuthInvalid(alias) {
-    updateAccount(alias, {
+export function clearAuthInvalid(index) {
+    updateAccount(index, {
         authInvalid: false,
         authInvalidatedAt: undefined
     });

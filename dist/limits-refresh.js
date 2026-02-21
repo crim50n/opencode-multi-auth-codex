@@ -1,14 +1,14 @@
 import { mergeRateLimits } from './rate-limits.js';
-import { loadStore, updateAccount } from './store.js';
+import { loadStore, updateAccountByAlias } from './store.js';
 import { probeRateLimitsForAccount } from './probe-limits.js';
 import { logError, logInfo } from './logger.js';
 export async function refreshRateLimitsForAccount(account) {
-    updateAccount(account.alias, { limitStatus: 'running', limitError: undefined });
+    updateAccountByAlias(account.alias, { limitStatus: 'running', limitError: undefined });
     logInfo(`Refreshing limits for ${account.alias}`);
     const probe = await probeRateLimitsForAccount(account);
     if (!probe.rateLimits) {
         logError(`Limit probe failed for ${account.alias}: ${probe.error || 'Probe failed'}`);
-        updateAccount(account.alias, {
+        updateAccountByAlias(account.alias, {
             limitStatus: 'error',
             limitError: probe.error || 'Probe failed',
             lastLimitErrorAt: Date.now()
@@ -19,7 +19,7 @@ export async function refreshRateLimitsForAccount(account) {
             error: probe.error || 'Probe failed'
         };
     }
-    updateAccount(account.alias, {
+    updateAccountByAlias(account.alias, {
         rateLimits: mergeRateLimits(account.rateLimits, probe.rateLimits),
         limitStatus: 'success',
         limitError: undefined,
@@ -40,7 +40,7 @@ export async function refreshRateLimits(accounts, alias) {
     for (const account of accounts) {
         results.push(await refreshRateLimitsForAccount(account));
     }
-    if (results.length === 0 && !store.activeAlias) {
+    if (results.length === 0 && store.activeIndex < 0) {
         return [{ alias: 'active', updated: false, error: 'No accounts configured' }];
     }
     return results;

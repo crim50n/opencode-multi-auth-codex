@@ -4,7 +4,9 @@ import * as os from 'os'
 import * as crypto from 'node:crypto'
 import type {
   AccountStore,
+  AccountStoreV1,
   AccountCredentials,
+  StoredAccount,
   RateLimitHistoryEntry,
   RateLimitSnapshot
 } from './types.js'
@@ -27,7 +29,6 @@ function getStoreFile(): string {
 }
 
 const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE'
-const STORE_VERSION = 1
 
 type EncryptedStoreFile = {
   encrypted: true
@@ -51,8 +52,9 @@ function ensureDir(): void {
 
 function emptyStore(): AccountStore {
   return {
-    accounts: {},
-    activeAlias: null,
+    version: 2,
+    accounts: [],
+    activeIndex: -1,
     rotationIndex: 0,
     lastRotation: Date.now()
   }
@@ -81,7 +83,7 @@ function encryptStore(store: AccountStore, passphrase: string): EncryptedStoreFi
   const tag = cipher.getAuthTag()
   return {
     encrypted: true,
-    version: STORE_VERSION,
+    version: 2,
     salt: salt.toString('base64'),
     iv: iv.toString('base64'),
     tag: tag.toString('base64'),
@@ -89,7 +91,7 @@ function encryptStore(store: AccountStore, passphrase: string): EncryptedStoreFi
   }
 }
 
-function decryptStore(file: EncryptedStoreFile, passphrase: string): AccountStore {
+function decryptStore(file: EncryptedStoreFile, passphrase: string): any {
   const salt = Buffer.from(file.salt, 'base64')
   const iv = Buffer.from(file.iv, 'base64')
   const tag = Buffer.from(file.tag, 'base64')
@@ -98,7 +100,7 @@ function decryptStore(file: EncryptedStoreFile, passphrase: string): AccountStor
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
   decipher.setAuthTag(tag)
   const decrypted = Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8')
-  return JSON.parse(decrypted) as AccountStore
+  return JSON.parse(decrypted)
 }
 
 function buildSnapshot(window?: { remaining?: number; limit?: number; resetAt?: number }): RateLimitSnapshot | undefined {
@@ -144,6 +146,94 @@ function appendHistory(
   return next
 }
 
+// --- Alias computation (backward compat for web.ts, probe-limits, etc.) ---
+
+function computeAlias(account: StoredAccount, index: number): string {
+  if (account.email) {
+    return account.email.split('@')[0] || `account-${index}`
+  }
+  return `account-${index}`
+}
+
+function assignAliases(accounts: StoredAccount[]): AccountCredentials[] {
+  const seen = new Map<string, number>()
+  return accounts.map((acc, idx) => {
+    let base = computeAlias(acc, idx)
+    const count = seen.get(base) || 0
+    seen.set(base, count + 1)
+    const alias = count === 0 ? base : `${base}-${count + 1}`
+    return { ...acc, alias, usageCount: acc.usageCount ?? 0 }
+  })
+}
+
+// --- Email deduplication (antigravity-style: keep newest per email) ---
+
+function deduplicateByEmail(accounts: StoredAccount[]): StoredAccount[] {
+  const byEmail = new Map<string, StoredAccount>()
+  const noEmail: StoredAccount[] = []
+
+  for (const acc of accounts) {
+    if (!acc.email) {
+      noEmail.push(acc)
+      continue
+    }
+    const existing = byEmail.get(acc.email)
+    if (!existing) {
+      byEmail.set(acc.email, acc)
+      continue
+    }
+    // Keep the one with the newest lastUsed, then addedAt
+    const existingTime = existing.lastUsed || existing.addedAt || 0
+    const newTime = acc.lastUsed || acc.addedAt || 0
+    if (newTime > existingTime) {
+      byEmail.set(acc.email, acc)
+    }
+  }
+
+  return [...byEmail.values(), ...noEmail]
+}
+
+// --- Migration from v1 (alias-keyed map) to v2 (array-based) ---
+
+function isV1Store(parsed: any): parsed is AccountStoreV1 {
+  return (
+    parsed &&
+    typeof parsed.accounts === 'object' &&
+    !Array.isArray(parsed.accounts) &&
+    !('version' in parsed)
+  )
+}
+
+function isV2Store(parsed: any): parsed is AccountStore {
+  return parsed && parsed.version === 2 && Array.isArray(parsed.accounts)
+}
+
+function migrateV1toV2(v1: AccountStoreV1): AccountStore {
+  const accounts: StoredAccount[] = Object.values(v1.accounts).map((acc) => {
+    const { alias, ...rest } = acc
+    return {
+      ...rest,
+      usageCount: rest.usageCount ?? 0,
+      addedAt: rest.lastSeenAt || Date.now(),
+      enabled: !rest.authInvalid
+    }
+  })
+
+  const activeIdx = v1.activeAlias
+    ? Object.keys(v1.accounts).indexOf(v1.activeAlias)
+    : -1
+
+  return {
+    version: 2,
+    accounts: deduplicateByEmail(accounts),
+    activeIndex: activeIdx >= 0 ? activeIdx : (accounts.length > 0 ? 0 : -1),
+    rotationIndex: v1.rotationIndex || 0,
+    lastRotation: v1.lastRotation || Date.now()
+  }
+}
+
+// --- Load / Save ---
+
 export function loadStore(): AccountStore {
   storeLocked = false
   lastStoreError = null
@@ -153,7 +243,8 @@ export function loadStore(): AccountStore {
   if (fs.existsSync(file)) {
     try {
       const data = fs.readFileSync(file, 'utf-8')
-      const parsed = JSON.parse(data)
+      let parsed = JSON.parse(data)
+
       if (isEncryptedFile(parsed)) {
         lastStoreEncrypted = true
         const passphrase = getPassphrase()
@@ -163,7 +254,7 @@ export function loadStore(): AccountStore {
           return emptyStore()
         }
         try {
-          return decryptStore(parsed, passphrase)
+          parsed = decryptStore(parsed, passphrase)
         } catch (err) {
           storeLocked = true
           lastStoreError = 'Failed to decrypt store. Check passphrase.'
@@ -171,7 +262,43 @@ export function loadStore(): AccountStore {
           return emptyStore()
         }
       }
-      return parsed as AccountStore
+
+      // Migration
+      if (isV1Store(parsed)) {
+        const v2 = migrateV1toV2(parsed)
+        // Save migrated store
+        try {
+          saveStore(v2)
+        } catch {
+          // best effort
+        }
+        return v2
+      }
+
+      if (isV2Store(parsed)) {
+        // Deduplicate on every load (like antigravity)
+        parsed.accounts = deduplicateByEmail(parsed.accounts)
+        // Clamp activeIndex
+        if (parsed.activeIndex >= parsed.accounts.length) {
+          parsed.activeIndex = parsed.accounts.length > 0 ? 0 : -1
+        }
+        return parsed
+      }
+
+      // Unknown format - try to parse as v1
+      if (parsed && typeof parsed.accounts === 'object') {
+        if (Array.isArray(parsed.accounts)) {
+          // Already array but no version marker - treat as v2
+          return {
+            version: 2,
+            accounts: deduplicateByEmail(parsed.accounts),
+            activeIndex: typeof parsed.activeIndex === 'number' ? parsed.activeIndex : 0,
+            rotationIndex: parsed.rotationIndex || 0,
+            lastRotation: parsed.lastRotation || Date.now()
+          }
+        }
+        return migrateV1toV2(parsed as AccountStoreV1)
+      }
     } catch {
       storeLocked = true
       lastStoreError = 'Failed to parse store. Store locked until fixed.'
@@ -268,93 +395,169 @@ export function getStoreDiagnostics(): {
   }
 }
 
+// --- Account operations (array-based, antigravity-style) ---
 
-export function addAccount(alias: string, creds: Omit<AccountCredentials, 'alias' | 'usageCount'>): AccountStore {
+/** Find account index by email. Returns -1 if not found. */
+export function findIndexByEmail(email: string): number {
+  const store = loadStore()
+  return store.accounts.findIndex((acc) => acc.email === email)
+}
+
+/** Find account index by refresh token. Returns -1 if not found. */
+export function findIndexByToken(access?: string, refresh?: string): number {
+  const store = loadStore()
+  return store.accounts.findIndex((acc) => {
+    if (access && acc.accessToken === access) return true
+    if (refresh && acc.refreshToken === refresh) return true
+    return false
+  })
+}
+
+/** Add or update an account. Deduplicates by email. Returns the store and the account's index. */
+export function addAccount(creds: Omit<StoredAccount, 'usageCount'>): { store: AccountStore; index: number } {
   const store = loadStore()
   const entry = buildHistoryEntry(creds.rateLimits)
-  store.accounts[alias] = {
+
+  const newAccount: StoredAccount = {
     ...creds,
-    alias,
     usageCount: 0,
+    addedAt: creds.addedAt || Date.now(),
+    enabled: creds.enabled !== false,
     rateLimitHistory: entry ? [entry] : creds.rateLimitHistory
   }
-  if (!store.activeAlias) {
-    store.activeAlias = alias
-  }
-  saveStore(store)
-  return store
-}
 
-export function removeAccount(alias: string): AccountStore {
-  const store = loadStore()
-  delete store.accounts[alias]
-  if (store.activeAlias === alias) {
-    const remaining = Object.keys(store.accounts)
-    store.activeAlias = remaining[0] || null
-  }
-  saveStore(store)
-  return store
-}
-
-export function updateAccount(alias: string, updates: Partial<AccountCredentials>): AccountStore {
-  const store = loadStore()
-  if (store.accounts[alias]) {
-    const current = store.accounts[alias]
-    const next = { ...current, ...updates }
-    if (updates.rateLimits || next.rateLimits) {
-      const entry = buildHistoryEntry(next.rateLimits)
-      if (entry) {
-        next.rateLimitHistory = appendHistory(current.rateLimitHistory, entry)
+  // Dedup by email: if same email exists, update it instead
+  if (creds.email) {
+    const existingIdx = store.accounts.findIndex((acc) => acc.email === creds.email)
+    if (existingIdx >= 0) {
+      const existing = store.accounts[existingIdx]
+      store.accounts[existingIdx] = {
+        ...existing,
+        ...newAccount,
+        usageCount: existing.usageCount || 0,
+        addedAt: existing.addedAt || newAccount.addedAt,
+        rateLimitHistory: entry
+          ? appendHistory(existing.rateLimitHistory, entry)
+          : existing.rateLimitHistory || newAccount.rateLimitHistory
       }
+      saveStore(store)
+      return { store, index: existingIdx }
     }
-    store.accounts[alias] = next
-    saveStore(store)
   }
+
+  // New account
+  store.accounts.push(newAccount)
+  const index = store.accounts.length - 1
+  if (store.activeIndex < 0) {
+    store.activeIndex = index
+  }
+  saveStore(store)
+  return { store, index }
+}
+
+/** Remove account by index. Returns updated store. */
+export function removeAccount(index: number): AccountStore {
+  const store = loadStore()
+  if (index < 0 || index >= store.accounts.length) return store
+
+  store.accounts.splice(index, 1)
+
+  // Adjust activeIndex
+  if (store.accounts.length === 0) {
+    store.activeIndex = -1
+  } else if (store.activeIndex === index) {
+    store.activeIndex = 0
+  } else if (store.activeIndex > index) {
+    store.activeIndex -= 1
+  }
+
+  // Adjust rotationIndex
+  if (store.rotationIndex >= store.accounts.length) {
+    store.rotationIndex = 0
+  }
+
+  saveStore(store)
   return store
 }
 
-export function setActiveAlias(alias: string | null): AccountStore {
+/** Remove account by email. Returns updated store. */
+export function removeAccountByEmail(email: string): AccountStore {
+  const idx = findIndexByEmail(email)
+  if (idx < 0) return loadStore()
+  return removeAccount(idx)
+}
+
+/** Update account at index. Returns updated store. */
+export function updateAccount(index: number, updates: Partial<StoredAccount>): AccountStore {
+  const store = loadStore()
+  if (index < 0 || index >= store.accounts.length) return store
+
+  const current = store.accounts[index]
+  const next = { ...current, ...updates }
+
+  if (updates.rateLimits || next.rateLimits) {
+    const entry = buildHistoryEntry(next.rateLimits)
+    if (entry) {
+      next.rateLimitHistory = appendHistory(current.rateLimitHistory, entry)
+    }
+  }
+
+  store.accounts[index] = next
+  saveStore(store)
+  return store
+}
+
+/** Update account by alias (backward compat for web.ts etc.). */
+export function updateAccountByAlias(alias: string, updates: Partial<StoredAccount>): AccountStore {
+  const accounts = listAccounts()
+  const idx = accounts.findIndex((acc) => acc.alias === alias)
+  if (idx < 0) return loadStore()
+  return updateAccount(idx, updates)
+}
+
+/** Set active account by index. */
+export function setActiveIndex(index: number): AccountStore {
   const store = loadStore()
   const now = Date.now()
-  const previousAlias = store.activeAlias
 
-  if (alias === null) {
-    store.activeAlias = null
-  } else if (store.accounts[alias]) {
-    if (previousAlias && previousAlias !== alias && store.accounts[previousAlias]) {
-      store.accounts[previousAlias] = {
-        ...store.accounts[previousAlias],
-        lastActiveUntil: now
-      }
-    }
-
-    store.activeAlias = alias
-    store.accounts[alias] = {
-      ...store.accounts[alias],
-      lastSeenAt: now,
-      lastActiveUntil: undefined
-    }
-
-    const aliases = Object.keys(store.accounts)
-    const idx = aliases.indexOf(alias)
-    if (idx >= 0) {
-      store.rotationIndex = idx
-    }
-    store.lastRotation = now
+  if (index < 0 || index >= store.accounts.length) {
+    store.activeIndex = store.accounts.length > 0 ? 0 : -1
+    saveStore(store)
+    return store
   }
+
+  const previousIndex = store.activeIndex
+  if (previousIndex >= 0 && previousIndex < store.accounts.length && previousIndex !== index) {
+    store.accounts[previousIndex] = {
+      ...store.accounts[previousIndex],
+      lastActiveUntil: now
+    }
+  }
+
+  store.activeIndex = index
+  store.accounts[index] = {
+    ...store.accounts[index],
+    lastSeenAt: now,
+    lastActiveUntil: undefined
+  }
+  store.rotationIndex = index
+  store.lastRotation = now
   saveStore(store)
   return store
 }
 
+/** Get the currently active account (with computed alias). */
 export function getActiveAccount(): AccountCredentials | null {
   const store = loadStore()
-  if (!store.activeAlias) return null
-  return store.accounts[store.activeAlias] || null
+  if (store.activeIndex < 0 || store.activeIndex >= store.accounts.length) return null
+  const acc = store.accounts[store.activeIndex]
+  return { ...acc, alias: computeAlias(acc, store.activeIndex), usageCount: acc.usageCount ?? 0 }
 }
 
+/** List all accounts with computed aliases. */
 export function listAccounts(): AccountCredentials[] {
   const store = loadStore()
-  return Object.values(store.accounts)
+  return assignAliases(store.accounts)
 }
 
 export function getStorePath(): string {
@@ -365,3 +568,20 @@ export function getStoreStatus(): { locked: boolean; encrypted: boolean; error: 
   const diag = getStoreDiagnostics()
   return { locked: diag.locked, encrypted: diag.encrypted, error: diag.error }
 }
+
+/** Remove account by alias (backward compat for web.ts etc.). */
+export function removeAccountByAlias(alias: string): AccountStore {
+  const accounts = listAccounts()
+  const idx = accounts.findIndex((acc) => acc.alias === alias)
+  if (idx < 0) return loadStore()
+  return removeAccount(idx)
+}
+
+/** Resolve alias to index (backward compat). Returns -1 if not found. */
+export function resolveAlias(alias: string): number {
+  const accounts = listAccounts()
+  return accounts.findIndex((acc) => acc.alias === alias)
+}
+
+// Backward compat: aliases for old API surface used by web.ts etc.
+export { setActiveIndex as setActiveAlias }

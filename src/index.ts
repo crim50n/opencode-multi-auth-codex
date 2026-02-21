@@ -15,8 +15,6 @@ import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
 
 const PROVIDER_ID = 'openai'
 const CODEX_BASE_URL = 'https://chatgpt.com/backend-api'
-const REDIRECT_PORT = 1455
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/auth/callback`
 const URL_PATHS = {
   RESPONSES: '/responses',
   CODEX_RESPONSES: '/codex/responses'
@@ -58,14 +56,7 @@ function extractRequestUrl(input: Request | string | URL): string {
   return input.url
 }
 
-function rewriteUrlForCodex(url: string): string {
-  return url.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES)
-}
-
 function extractPathAndSearch(url: string): string {
-  // OpenCode sometimes passes relative paths (e.g. "/chat/completions") or even
-  // malformed strings when provider base_url is missing (e.g. "undefined/...").
-  // We only need the path+query and then we force the ChatGPT backend base URL.
   try {
     const u = new URL(url)
     return `${u.pathname}${u.search}`
@@ -113,9 +104,6 @@ function normalizeModel(model: string | undefined): string {
   const modelId = model.includes('/') ? model.split('/').pop()! : model
   const baseModel = modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '')
 
-  // OpenCode currently allowlists gpt-5.2-codex, but we can route it to the latest
-  // Codex model on the ChatGPT backend for users who want the newest model without
-  // waiting for upstream registry updates.
   const preferLatestRaw = process.env.OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST
   const preferLatest = preferLatestRaw !== '0' && preferLatestRaw !== 'false'
 
@@ -192,9 +180,10 @@ async function convertSseToJson(response: Response, headers: Headers): Promise<R
 }
 
 /**
- * Multi-account OAuth plugin for OpenCode
+ * Multi-account OAuth plugin for OpenCode (antigravity-style)
  *
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
+ * Accounts are identified by email, stored in an array with activeIndex.
  */
 const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, directory }: PluginInput) => {
   const terminalNotifierPath = (() => {
@@ -236,7 +225,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
     const macOpenRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN
     const macOpenEnabled = macOpenRaw !== '0' && macOpenRaw !== 'false'
 
-    // Best effort: clickable notifications require terminal-notifier.
     if (macOpenEnabled && clickUrl && terminalNotifierPath) {
       try {
         $`${terminalNotifierPath} -title ${title} -message ${message} -open ${clickUrl}`
@@ -259,7 +247,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
         const safeMessage = escapeAppleScriptString(message)
         const script = `display notification "${safeMessage}" with title "${safeTitle}"`
 
-        // Fire-and-forget: never block OpenCode event processing.
         $`${osascript} -e ${script}`.nothrow().catch(() => {})
       } catch {
         // ignore
@@ -304,7 +291,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
         query: { directory }
       })
 
-      // @opencode-ai/sdk returns { data } shape.
       const data = (res as any)?.data as { title?: string } | undefined
       const meta: SessionMeta = { title: data?.title }
       sessionMetaCache.set(sessionID, meta)
@@ -351,7 +337,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
     const title = formatTitle(kind)
     const body = await formatBody(kind, sessionID, detail)
 
-    // ntfy priority: 1=min, 3=default, 5=max
     const priority = kind === 'error' ? '5' : kind === 'retry' ? '4' : '3'
 
     const headers: Record<string, string> = {
@@ -384,7 +369,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
     const parts: string[] = []
     if (typeof attempt === 'number') parts.push(`Attempt: ${attempt}`)
-    // OpenCode has emitted both "seconds-until-next" and "epoch ms" variants over time.
     if (typeof next === 'number') {
       const seconds =
         next > 1e12 ? Math.max(0, Math.round((next - Date.now()) / 1000)) : Math.max(0, Math.round(next))
@@ -510,8 +494,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 	            tool_call: true,
 	            temperature: true,
 	            limit: {
-	              // Be conservative: upstream model metadata changes over time and
-	              // incorrect limits prevent OpenCode's compaction from triggering.
 	              context: 200000,
 	              output: 8192
 	            }
@@ -558,7 +540,8 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
             )
           }
 
-          const { account, token } = rotation
+          const { account, token, index: accountIndex } = rotation
+          const label = account.email || `#${accountIndex}`
           const decoded = decodeJWT(token)
           const accountId = decoded?.[JWT_CLAIM_PATH]?.chatgpt_account_id
           if (!accountId) {
@@ -588,8 +571,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 	            store: false
 	          }
 
-	          // Note: The ChatGPT Codex backend does not currently accept
-	          // `truncation`. Keep this opt-in and default off.
 	          if (payload.truncation === undefined) {
 	            const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || '').trim()
 	            if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
@@ -639,28 +620,28 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
             const limitUpdate = extractRateLimitUpdate(res.headers)
             if (limitUpdate) {
-              updateAccount(account.alias, {
+              updateAccount(accountIndex, {
                 rateLimits: mergeRateLimits(account.rateLimits, limitUpdate)
               })
             }
 
-            // Handle rate limiting with automatic rotation
+            // Handle auth failures with automatic rotation
             if (res.status === 401 || res.status === 403) {
               const errorData = await res.clone().json().catch(() => ({})) as { error?: { message?: string } }
               const message = errorData?.error?.message || ''
               if (message.toLowerCase().includes('invalidated') || res.status === 401) {
-                markAuthInvalid(account.alias)
+                markAuthInvalid(accountIndex)
               }
 
               const retryRotation = await getNextAccount(pluginConfig)
-              if (retryRotation && retryRotation.account.alias !== account.alias) {
+              if (retryRotation && retryRotation.index !== accountIndex) {
                 return customFetch(input, init)
               }
 
               return new Response(
                 JSON.stringify({
                   error: {
-                    message: `[multi-auth][acc=${account.alias}] Unauthorized on all accounts. ${message}`.trim()
+                    message: `[multi-auth][${label}] Unauthorized on all accounts. ${message}`.trim()
                   }
                 }),
                 { status: res.status, headers: { 'Content-Type': 'application/json' } }
@@ -668,11 +649,11 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
             }
 
             if (res.status === 429) {
-              markRateLimited(account.alias, pluginConfig.rateLimitCooldownMs)
+              markRateLimited(accountIndex, pluginConfig.rateLimitCooldownMs)
 
               // Try another account
               const retryRotation = await getNextAccount(pluginConfig)
-              if (retryRotation && retryRotation.account.alias !== account.alias) {
+              if (retryRotation && retryRotation.index !== accountIndex) {
                 return customFetch(input, init)
               }
 
@@ -681,7 +662,7 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
               return new Response(
                 JSON.stringify({
                   error: {
-                    message: `[multi-auth][acc=${account.alias}] Rate limited on all accounts. ${errorData.error?.message || ''}`
+                    message: `[multi-auth][${label}] Rate limited on all accounts. ${errorData.error?.message || ''}`
                   }
                 }),
                 { status: 429, headers: { 'Content-Type': 'application/json' } }
@@ -689,8 +670,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
             }
 
             if (res.status === 402) {
-              // Some accounts can temporarily be in a deactivated workspace state.
-              // Rotate to the next account instead of hard-failing the request.
               const errorData = await res.clone().json().catch(() => null) as any
               const errorText = await res.clone().text().catch(() => '')
 
@@ -712,19 +691,19 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                 message.toLowerCase().includes('deactivated workspace')
 
               if (isDeactivatedWorkspace) {
-                markWorkspaceDeactivated(account.alias, pluginConfig.workspaceDeactivatedCooldownMs, {
+                markWorkspaceDeactivated(accountIndex, pluginConfig.workspaceDeactivatedCooldownMs, {
                   error: message || code
                 })
 
                 const retryRotation = await getNextAccount(pluginConfig)
-                if (retryRotation && retryRotation.account.alias !== account.alias) {
+                if (retryRotation && retryRotation.index !== accountIndex) {
                   return customFetch(input, init)
                 }
 
                 return new Response(
                   JSON.stringify({
                     error: {
-                      message: `[multi-auth][acc=${account.alias}] Workspace deactivated on all accounts. ${message || code}`.trim()
+                      message: `[multi-auth][${label}] Workspace deactivated on all accounts. ${message || code}`.trim()
                     }
                   }),
                   { status: 402, headers: { 'Content-Type': 'application/json' } }
@@ -733,9 +712,6 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
             }
 
             if (res.status === 400) {
-              // Some accounts get staged access to newer Codex models (e.g. gpt-5.3-codex).
-              // If the backend says the model isn't supported for this account, temporarily
-              // skip it instead of trapping the whole rotation on a permanent 400 loop.
               const errorData = await res.clone().json().catch(() => ({})) as any
               const message =
                 (typeof errorData?.detail === 'string' && errorData.detail) ||
@@ -749,13 +725,13 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                 message.toLowerCase().includes('chatgpt account')
 
               if (isModelUnsupported) {
-                markModelUnsupported(account.alias, pluginConfig.modelUnsupportedCooldownMs, {
+                markModelUnsupported(accountIndex, pluginConfig.modelUnsupportedCooldownMs, {
                   model: normalizedModel,
                   error: message
                 })
 
                 const retryRotation = await getNextAccount(pluginConfig)
-                if (retryRotation && retryRotation.account.alias !== account.alias) {
+                if (retryRotation && retryRotation.index !== accountIndex) {
                   return customFetch(input, init)
                 }
 
@@ -802,7 +778,8 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
           type: 'oauth' as const,
 
           /**
-           * OAuth flow - opens browser for ChatGPT login
+           * OAuth flow - opens browser for ChatGPT login.
+           * No alias prompt — accounts identified by email automatically.
            */
           authorize: async () => {
             const flow = await createAuthorizationFlow()
@@ -814,7 +791,7 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
               callback: async () => {
                 try {
-                  const account = await loginAccount(undefined, flow)
+                  const account = await loginAccount(flow)
                   return {
                     type: 'success' as const,
                     provider: PROVIDER_ID,

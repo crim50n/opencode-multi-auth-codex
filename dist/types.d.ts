@@ -11,6 +11,8 @@ export interface AccountCredentials {
     lastActiveUntil?: number;
     lastUsed?: number;
     usageCount: number;
+    addedAt?: number;
+    enabled?: boolean;
     rateLimitedUntil?: number;
     modelUnsupportedUntil?: number;
     modelUnsupportedAt?: number;
@@ -31,6 +33,7 @@ export interface AccountCredentials {
     notes?: string;
     source?: 'opencode' | 'codex';
 }
+export type StoredAccount = Omit<AccountCredentials, 'alias'>;
 export interface RateLimitWindow {
     limit?: number;
     remaining?: number;
@@ -53,6 +56,13 @@ export interface RateLimitHistoryEntry {
 }
 export type LimitStatus = 'idle' | 'queued' | 'running' | 'success' | 'error' | 'stopped';
 export interface AccountStore {
+    version: 2;
+    accounts: StoredAccount[];
+    activeIndex: number;
+    rotationIndex: number;
+    lastRotation: number;
+}
+export interface AccountStoreV1 {
     accounts: Record<string, AccountCredentials>;
     activeAlias: string | null;
     rotationIndex: number;

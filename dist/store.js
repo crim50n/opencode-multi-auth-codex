@@ -19,7 +19,6 @@ function getStoreFile() {
     return path.join(getStoreDir(), DEFAULT_STORE_FILE);
 }
 const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE';
-const STORE_VERSION = 1;
 let storeLocked = false;
 let lastStoreError = null;
 let lastStoreEncrypted = false;
@@ -31,8 +30,9 @@ function ensureDir() {
 }
 function emptyStore() {
     return {
-        accounts: {},
-        activeAlias: null,
+        version: 2,
+        accounts: [],
+        activeIndex: -1,
         rotationIndex: 0,
         lastRotation: Date.now()
     };
@@ -57,7 +57,7 @@ function encryptStore(store, passphrase) {
     const tag = cipher.getAuthTag();
     return {
         encrypted: true,
-        version: STORE_VERSION,
+        version: 2,
         salt: salt.toString('base64'),
         iv: iv.toString('base64'),
         tag: tag.toString('base64'),
@@ -111,6 +111,78 @@ function appendHistory(history, entry) {
     }
     return next;
 }
+// --- Alias computation (backward compat for web.ts, probe-limits, etc.) ---
+function computeAlias(account, index) {
+    if (account.email) {
+        return account.email.split('@')[0] || `account-${index}`;
+    }
+    return `account-${index}`;
+}
+function assignAliases(accounts) {
+    const seen = new Map();
+    return accounts.map((acc, idx) => {
+        let base = computeAlias(acc, idx);
+        const count = seen.get(base) || 0;
+        seen.set(base, count + 1);
+        const alias = count === 0 ? base : `${base}-${count + 1}`;
+        return { ...acc, alias, usageCount: acc.usageCount ?? 0 };
+    });
+}
+// --- Email deduplication (antigravity-style: keep newest per email) ---
+function deduplicateByEmail(accounts) {
+    const byEmail = new Map();
+    const noEmail = [];
+    for (const acc of accounts) {
+        if (!acc.email) {
+            noEmail.push(acc);
+            continue;
+        }
+        const existing = byEmail.get(acc.email);
+        if (!existing) {
+            byEmail.set(acc.email, acc);
+            continue;
+        }
+        // Keep the one with the newest lastUsed, then addedAt
+        const existingTime = existing.lastUsed || existing.addedAt || 0;
+        const newTime = acc.lastUsed || acc.addedAt || 0;
+        if (newTime > existingTime) {
+            byEmail.set(acc.email, acc);
+        }
+    }
+    return [...byEmail.values(), ...noEmail];
+}
+// --- Migration from v1 (alias-keyed map) to v2 (array-based) ---
+function isV1Store(parsed) {
+    return (parsed &&
+        typeof parsed.accounts === 'object' &&
+        !Array.isArray(parsed.accounts) &&
+        !('version' in parsed));
+}
+function isV2Store(parsed) {
+    return parsed && parsed.version === 2 && Array.isArray(parsed.accounts);
+}
+function migrateV1toV2(v1) {
+    const accounts = Object.values(v1.accounts).map((acc) => {
+        const { alias, ...rest } = acc;
+        return {
+            ...rest,
+            usageCount: rest.usageCount ?? 0,
+            addedAt: rest.lastSeenAt || Date.now(),
+            enabled: !rest.authInvalid
+        };
+    });
+    const activeIdx = v1.activeAlias
+        ? Object.keys(v1.accounts).indexOf(v1.activeAlias)
+        : -1;
+    return {
+        version: 2,
+        accounts: deduplicateByEmail(accounts),
+        activeIndex: activeIdx >= 0 ? activeIdx : (accounts.length > 0 ? 0 : -1),
+        rotationIndex: v1.rotationIndex || 0,
+        lastRotation: v1.lastRotation || Date.now()
+    };
+}
+// --- Load / Save ---
 export function loadStore() {
     storeLocked = false;
     lastStoreError = null;
@@ -120,7 +192,7 @@ export function loadStore() {
     if (fs.existsSync(file)) {
         try {
             const data = fs.readFileSync(file, 'utf-8');
-            const parsed = JSON.parse(data);
+            let parsed = JSON.parse(data);
             if (isEncryptedFile(parsed)) {
                 lastStoreEncrypted = true;
                 const passphrase = getPassphrase();
@@ -130,7 +202,7 @@ export function loadStore() {
                     return emptyStore();
                 }
                 try {
-                    return decryptStore(parsed, passphrase);
+                    parsed = decryptStore(parsed, passphrase);
                 }
                 catch (err) {
                     storeLocked = true;
@@ -139,7 +211,41 @@ export function loadStore() {
                     return emptyStore();
                 }
             }
-            return parsed;
+            // Migration
+            if (isV1Store(parsed)) {
+                const v2 = migrateV1toV2(parsed);
+                // Save migrated store
+                try {
+                    saveStore(v2);
+                }
+                catch {
+                    // best effort
+                }
+                return v2;
+            }
+            if (isV2Store(parsed)) {
+                // Deduplicate on every load (like antigravity)
+                parsed.accounts = deduplicateByEmail(parsed.accounts);
+                // Clamp activeIndex
+                if (parsed.activeIndex >= parsed.accounts.length) {
+                    parsed.activeIndex = parsed.accounts.length > 0 ? 0 : -1;
+                }
+                return parsed;
+            }
+            // Unknown format - try to parse as v1
+            if (parsed && typeof parsed.accounts === 'object') {
+                if (Array.isArray(parsed.accounts)) {
+                    // Already array but no version marker - treat as v2
+                    return {
+                        version: 2,
+                        accounts: deduplicateByEmail(parsed.accounts),
+                        activeIndex: typeof parsed.activeIndex === 'number' ? parsed.activeIndex : 0,
+                        rotationIndex: parsed.rotationIndex || 0,
+                        lastRotation: parsed.lastRotation || Date.now()
+                    };
+                }
+                return migrateV1toV2(parsed);
+            }
         }
         catch {
             storeLocked = true;
@@ -231,86 +337,155 @@ export function getStoreDiagnostics() {
         error: lastStoreError
     };
 }
-export function addAccount(alias, creds) {
+// --- Account operations (array-based, antigravity-style) ---
+/** Find account index by email. Returns -1 if not found. */
+export function findIndexByEmail(email) {
+    const store = loadStore();
+    return store.accounts.findIndex((acc) => acc.email === email);
+}
+/** Find account index by refresh token. Returns -1 if not found. */
+export function findIndexByToken(access, refresh) {
+    const store = loadStore();
+    return store.accounts.findIndex((acc) => {
+        if (access && acc.accessToken === access)
+            return true;
+        if (refresh && acc.refreshToken === refresh)
+            return true;
+        return false;
+    });
+}
+/** Add or update an account. Deduplicates by email. Returns the store and the account's index. */
+export function addAccount(creds) {
     const store = loadStore();
     const entry = buildHistoryEntry(creds.rateLimits);
-    store.accounts[alias] = {
+    const newAccount = {
         ...creds,
-        alias,
         usageCount: 0,
+        addedAt: creds.addedAt || Date.now(),
+        enabled: creds.enabled !== false,
         rateLimitHistory: entry ? [entry] : creds.rateLimitHistory
     };
-    if (!store.activeAlias) {
-        store.activeAlias = alias;
-    }
-    saveStore(store);
-    return store;
-}
-export function removeAccount(alias) {
-    const store = loadStore();
-    delete store.accounts[alias];
-    if (store.activeAlias === alias) {
-        const remaining = Object.keys(store.accounts);
-        store.activeAlias = remaining[0] || null;
-    }
-    saveStore(store);
-    return store;
-}
-export function updateAccount(alias, updates) {
-    const store = loadStore();
-    if (store.accounts[alias]) {
-        const current = store.accounts[alias];
-        const next = { ...current, ...updates };
-        if (updates.rateLimits || next.rateLimits) {
-            const entry = buildHistoryEntry(next.rateLimits);
-            if (entry) {
-                next.rateLimitHistory = appendHistory(current.rateLimitHistory, entry);
-            }
+    // Dedup by email: if same email exists, update it instead
+    if (creds.email) {
+        const existingIdx = store.accounts.findIndex((acc) => acc.email === creds.email);
+        if (existingIdx >= 0) {
+            const existing = store.accounts[existingIdx];
+            store.accounts[existingIdx] = {
+                ...existing,
+                ...newAccount,
+                usageCount: existing.usageCount || 0,
+                addedAt: existing.addedAt || newAccount.addedAt,
+                rateLimitHistory: entry
+                    ? appendHistory(existing.rateLimitHistory, entry)
+                    : existing.rateLimitHistory || newAccount.rateLimitHistory
+            };
+            saveStore(store);
+            return { store, index: existingIdx };
         }
-        store.accounts[alias] = next;
-        saveStore(store);
     }
+    // New account
+    store.accounts.push(newAccount);
+    const index = store.accounts.length - 1;
+    if (store.activeIndex < 0) {
+        store.activeIndex = index;
+    }
+    saveStore(store);
+    return { store, index };
+}
+/** Remove account by index. Returns updated store. */
+export function removeAccount(index) {
+    const store = loadStore();
+    if (index < 0 || index >= store.accounts.length)
+        return store;
+    store.accounts.splice(index, 1);
+    // Adjust activeIndex
+    if (store.accounts.length === 0) {
+        store.activeIndex = -1;
+    }
+    else if (store.activeIndex === index) {
+        store.activeIndex = 0;
+    }
+    else if (store.activeIndex > index) {
+        store.activeIndex -= 1;
+    }
+    // Adjust rotationIndex
+    if (store.rotationIndex >= store.accounts.length) {
+        store.rotationIndex = 0;
+    }
+    saveStore(store);
     return store;
 }
-export function setActiveAlias(alias) {
+/** Remove account by email. Returns updated store. */
+export function removeAccountByEmail(email) {
+    const idx = findIndexByEmail(email);
+    if (idx < 0)
+        return loadStore();
+    return removeAccount(idx);
+}
+/** Update account at index. Returns updated store. */
+export function updateAccount(index, updates) {
+    const store = loadStore();
+    if (index < 0 || index >= store.accounts.length)
+        return store;
+    const current = store.accounts[index];
+    const next = { ...current, ...updates };
+    if (updates.rateLimits || next.rateLimits) {
+        const entry = buildHistoryEntry(next.rateLimits);
+        if (entry) {
+            next.rateLimitHistory = appendHistory(current.rateLimitHistory, entry);
+        }
+    }
+    store.accounts[index] = next;
+    saveStore(store);
+    return store;
+}
+/** Update account by alias (backward compat for web.ts etc.). */
+export function updateAccountByAlias(alias, updates) {
+    const accounts = listAccounts();
+    const idx = accounts.findIndex((acc) => acc.alias === alias);
+    if (idx < 0)
+        return loadStore();
+    return updateAccount(idx, updates);
+}
+/** Set active account by index. */
+export function setActiveIndex(index) {
     const store = loadStore();
     const now = Date.now();
-    const previousAlias = store.activeAlias;
-    if (alias === null) {
-        store.activeAlias = null;
+    if (index < 0 || index >= store.accounts.length) {
+        store.activeIndex = store.accounts.length > 0 ? 0 : -1;
+        saveStore(store);
+        return store;
     }
-    else if (store.accounts[alias]) {
-        if (previousAlias && previousAlias !== alias && store.accounts[previousAlias]) {
-            store.accounts[previousAlias] = {
-                ...store.accounts[previousAlias],
-                lastActiveUntil: now
-            };
-        }
-        store.activeAlias = alias;
-        store.accounts[alias] = {
-            ...store.accounts[alias],
-            lastSeenAt: now,
-            lastActiveUntil: undefined
+    const previousIndex = store.activeIndex;
+    if (previousIndex >= 0 && previousIndex < store.accounts.length && previousIndex !== index) {
+        store.accounts[previousIndex] = {
+            ...store.accounts[previousIndex],
+            lastActiveUntil: now
         };
-        const aliases = Object.keys(store.accounts);
-        const idx = aliases.indexOf(alias);
-        if (idx >= 0) {
-            store.rotationIndex = idx;
-        }
-        store.lastRotation = now;
     }
+    store.activeIndex = index;
+    store.accounts[index] = {
+        ...store.accounts[index],
+        lastSeenAt: now,
+        lastActiveUntil: undefined
+    };
+    store.rotationIndex = index;
+    store.lastRotation = now;
     saveStore(store);
     return store;
 }
+/** Get the currently active account (with computed alias). */
 export function getActiveAccount() {
     const store = loadStore();
-    if (!store.activeAlias)
+    if (store.activeIndex < 0 || store.activeIndex >= store.accounts.length)
         return null;
-    return store.accounts[store.activeAlias] || null;
+    const acc = store.accounts[store.activeIndex];
+    return { ...acc, alias: computeAlias(acc, store.activeIndex), usageCount: acc.usageCount ?? 0 };
 }
+/** List all accounts with computed aliases. */
 export function listAccounts() {
     const store = loadStore();
-    return Object.values(store.accounts);
+    return assignAliases(store.accounts);
 }
 export function getStorePath() {
     return getStoreFile();
@@ -319,4 +494,19 @@ export function getStoreStatus() {
     const diag = getStoreDiagnostics();
     return { locked: diag.locked, encrypted: diag.encrypted, error: diag.error };
 }
+/** Remove account by alias (backward compat for web.ts etc.). */
+export function removeAccountByAlias(alias) {
+    const accounts = listAccounts();
+    const idx = accounts.findIndex((acc) => acc.alias === alias);
+    if (idx < 0)
+        return loadStore();
+    return removeAccount(idx);
+}
+/** Resolve alias to index (backward compat). Returns -1 if not found. */
+export function resolveAlias(alias) {
+    const accounts = listAccounts();
+    return accounts.findIndex((acc) => acc.alias === alias);
+}
+// Backward compat: aliases for old API surface used by web.ts etc.
+export { setActiveIndex as setActiveAlias };
 //# sourceMappingURL=store.js.map

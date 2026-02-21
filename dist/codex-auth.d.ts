@@ -17,9 +17,10 @@ export declare function getEmailFromClaims(claims: Record<string, any> | null): 
 export declare function getAccountIdFromClaims(claims: Record<string, any> | null): string | undefined;
 export declare function getExpiryFromClaims(claims: Record<string, any> | null): number | undefined;
 export declare function syncCodexAuthFile(): {
-    alias: string | null;
+    index: number | null;
     added: boolean;
     updated: boolean;
+    alias?: string;
 };
 export declare function getCodexAuthStatus(): {
     error: string | null;

@@ -1,5 +1,5 @@
 import type { Auth } from '@opencode-ai/sdk'
-import { addAccount, loadStore, updateAccount } from './store.js'
+import { addAccount, findIndexByEmail, findIndexByToken, loadStore, updateAccount } from './store.js'
 import { decodeJwtPayload, getAccountIdFromClaims, getEmailFromClaims } from './codex-auth.js'
 
 const OPENAI_ISSUER = 'https://auth.openai.com'
@@ -21,33 +21,6 @@ async function fetchEmail(accessToken: string): Promise<string | undefined> {
   }
 }
 
-function findAccountAliasByToken(access: string, refresh?: string): string | null {
-  const store = loadStore()
-  for (const account of Object.values(store.accounts)) {
-    if (account.accessToken === access) return account.alias
-    if (refresh && account.refreshToken === refresh) return account.alias
-  }
-  return null
-}
-
-function findAccountAliasByEmail(email: string, store: ReturnType<typeof loadStore>): string | null {
-  for (const account of Object.values(store.accounts)) {
-    if (account.email && account.email === email) return account.alias
-  }
-  return null
-}
-
-function buildAlias(email: string | undefined, existingAliases: Set<string>): string {
-  const base = email ? email.split('@')[0] : 'account'
-  let candidate = base || 'account'
-  let suffix = 1
-  while (existingAliases.has(candidate)) {
-    candidate = `${base}-${suffix}`
-    suffix += 1
-  }
-  return candidate
-}
-
 export async function syncAuthFromOpenCode(getAuth: () => Promise<Auth>): Promise<void> {
   const now = Date.now()
   if (now - lastSyncAt < AUTH_SYNC_COOLDOWN_MS) return
@@ -66,12 +39,14 @@ export async function syncAuthFromOpenCode(getAuth: () => Promise<Auth>): Promis
 
   lastSyncedAccess = auth.access
 
-  const existingAlias = findAccountAliasByToken(auth.access, auth.refresh)
   const accessClaims = decodeJwtPayload(auth.access)
   const derivedEmail = getEmailFromClaims(accessClaims)
   const derivedAccountId = getAccountIdFromClaims(accessClaims)
-  if (existingAlias) {
-    updateAccount(existingAlias, {
+
+  // Try to find existing account by token
+  const tokenIdx = findIndexByToken(auth.access, auth.refresh)
+  if (tokenIdx >= 0) {
+    updateAccount(tokenIdx, {
       accessToken: auth.access,
       refreshToken: auth.refresh,
       expiresAt: auth.expires,
@@ -81,12 +56,12 @@ export async function syncAuthFromOpenCode(getAuth: () => Promise<Auth>): Promis
     return
   }
 
-  const store = loadStore()
+  // Try to find by email
   const email = (await fetchEmail(auth.access)) || derivedEmail
   if (email) {
-    const existingByEmail = findAccountAliasByEmail(email, store)
-    if (existingByEmail) {
-      updateAccount(existingByEmail, {
+    const emailIdx = findIndexByEmail(email)
+    if (emailIdx >= 0) {
+      updateAccount(emailIdx, {
         accessToken: auth.access,
         refreshToken: auth.refresh,
         expiresAt: auth.expires,
@@ -95,9 +70,9 @@ export async function syncAuthFromOpenCode(getAuth: () => Promise<Auth>): Promis
       return
     }
   }
-  const alias = buildAlias(email, new Set(Object.keys(store.accounts)))
 
-  addAccount(alias, {
+  // New account — addAccount will dedup by email if needed
+  addAccount({
     accessToken: auth.access,
     refreshToken: auth.refresh,
     expiresAt: auth.expires,

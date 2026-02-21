@@ -8,7 +8,7 @@ import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js'
 import { getCodexAuthPath, getCodexAuthStatus, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js'
-import { getStoreStatus, listAccounts, loadStore, removeAccount, updateAccount } from './store.js'
+import { getStoreStatus, listAccounts, loadStore, removeAccountByAlias, updateAccountByAlias } from './store.js'
 import { getRefreshQueueState, startRefreshQueue, stopRefreshQueue } from './refresh-queue.js'
 import { getLogPath, logError, logInfo, readLogTail } from './logger.js'
 import type { AccountCredentials, RateLimitWindow } from './types.js'
@@ -1291,7 +1291,7 @@ function runSync(): void {
     lastSyncAt = Date.now()
     lastSyncError = authStatus.error
     if (result.updated || result.added) {
-      logInfo(`Synced auth.json (${result.alias ?? 'none'})`)
+      logInfo(`Synced auth.json (index=${result.index ?? 'none'})`)
     }
     if (authStatus.error) {
       logError(authStatus.error)
@@ -1759,13 +1759,16 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
     if (req.method === 'GET' && path === '/api/state') {
       runSync()
       const store = loadStore()
-      const rawAccounts = Object.values(store.accounts)
-      const accounts = rawAccounts.map(scrubAccount)
+      const allAccounts = listAccounts()
+      const accounts = allAccounts.map(scrubAccount)
       const storeStatus = getStoreStatus()
       const antigravity = loadAntigravityAccounts()
+      const activeAccount = store.activeIndex >= 0 && store.activeIndex < allAccounts.length
+        ? allAccounts[store.activeIndex]
+        : null
       sendJson(res, 200, {
         authPath: getCodexAuthPath(),
-        currentAlias: store.activeAlias,
+        currentAlias: activeAccount?.alias || null,
         accounts,
         lastSyncAt,
         lastSyncError,
@@ -1774,7 +1777,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
         lastLoginError,
         antigravity: { ...antigravity, quota: antigravityQuotaState },
         queue: getRefreshQueueState(),
-        recommendedAlias: recommendAlias(rawAccounts),
+        recommendedAlias: recommendAlias(allAccounts),
         logPath: getLogPath()
       })
       return
@@ -1800,27 +1803,24 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
 
     if (req.method === 'POST' && path === '/api/auth/start') {
       const body = await readJsonBody(req)
-      const alias = typeof body.alias === 'string' ? body.alias.trim() : ''
-      if (!alias) {
-        sendJson(res, 400, { error: 'Missing alias' })
-        return
-      }
       if (pendingLogin) {
         sendJson(res, 409, { error: `Login already in progress for ${pendingLogin.alias}` })
         return
       }
       try {
         const flow = await createAuthorizationFlow()
-        pendingLogin = { alias, startedAt: Date.now(), url: flow.url }
+        const label = typeof body.alias === 'string' && body.alias.trim() ? body.alias.trim() : 'new-account'
+        pendingLogin = { alias: label, startedAt: Date.now(), url: flow.url }
         lastLoginError = null
-        loginAccount(alias, flow)
-          .then(() => {
-            logInfo(`Login completed for ${alias}`)
+        loginAccount(flow)
+          .then((account) => {
+            const displayName = account.email || account.alias || label
+            logInfo(`Login completed for ${displayName}`)
             pendingLogin = null
           })
           .catch((err) => {
             lastLoginError = String(err)
-            logError(`Login failed for ${alias}: ${err}`)
+            logError(`Login failed: ${err}`)
             pendingLogin = null
           })
         sendJson(res, 200, { ok: true, url: flow.url })
@@ -1852,7 +1852,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
         sendJson(res, 400, { error: 'Missing alias' })
         return
       }
-      removeAccount(body.alias)
+      removeAccountByAlias(body.alias)
       sendJson(res, 200, { ok: true })
       return
     }
@@ -1871,7 +1871,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
         : []
       const uniqueTags = Array.from(new Set(tags))
       const notes = typeof body.notes === 'string' ? body.notes.trim() : ''
-      updateAccount(body.alias, {
+      updateAccountByAlias(body.alias, {
         tags: uniqueTags.length > 0 ? uniqueTags : undefined,
         notes: notes || undefined
       })
@@ -1881,28 +1881,31 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
 
     if (req.method === 'POST' && path === '/api/token/refresh') {
       const body = await readJsonBody(req)
-      const store = loadStore()
-      const candidates = Object.values(store.accounts)
+      const allAccounts = listAccounts()
       const alias = typeof body.alias === 'string' ? body.alias : undefined
-      const targets = alias ? candidates.filter((acc) => acc.alias === alias) : candidates
+      const targets = alias ? allAccounts.filter((acc) => acc.alias === alias) : allAccounts
       if (alias && targets.length === 0) {
         sendJson(res, 400, { error: 'Unknown alias' })
         return
       }
 
+      const store = loadStore()
       const results: Array<{ alias: string; updated: boolean; error?: string }> = []
-      for (const account of targets) {
+      for (let i = 0; i < targets.length; i++) {
+        const account = targets[i]
+        // Find the actual index in the store for this account
+        const accountIndex = allAccounts.indexOf(account)
         if (!account.refreshToken) {
           results.push({ alias: account.alias, updated: false, error: 'No refresh token' })
           continue
         }
-        const refreshed = await refreshToken(account.alias)
+        const refreshed = await refreshToken(accountIndex)
         if (!refreshed) {
           results.push({ alias: account.alias, updated: false, error: 'Token refresh failed' })
           continue
         }
 
-        if (store.activeAlias === account.alias && refreshed.idToken) {
+        if (store.activeIndex === accountIndex && refreshed.idToken) {
           try {
             writeCodexAuthForAlias(account.alias)
           } catch (err) {

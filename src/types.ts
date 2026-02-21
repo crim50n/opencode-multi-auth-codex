@@ -1,5 +1,7 @@
-// Account credentials stored locally
+// Account credentials stored locally (antigravity-style: array-based, email-identified)
 export interface AccountCredentials {
+  // Computed backward-compat field: derived from email or array index.
+  // NOT a user-entered value. Populated by the store layer on load.
   alias: string
   accessToken: string
   refreshToken: string
@@ -12,6 +14,8 @@ export interface AccountCredentials {
   lastActiveUntil?: number
   lastUsed?: number
   usageCount: number
+  addedAt?: number
+  enabled?: boolean
   rateLimitedUntil?: number // If hit rate limit, when it resets
   // Some accounts don't have access to a given Codex model yet (staged rollout).
   // We temporarily skip them instead of hard-invalidating the account.
@@ -36,6 +40,9 @@ export interface AccountCredentials {
   notes?: string
   source?: 'opencode' | 'codex'
 }
+
+// Serialized account (without computed alias)
+export type StoredAccount = Omit<AccountCredentials, 'alias'>
 
 export interface RateLimitWindow {
   limit?: number
@@ -63,8 +70,17 @@ export interface RateLimitHistoryEntry {
 
 export type LimitStatus = 'idle' | 'queued' | 'running' | 'success' | 'error' | 'stopped'
 
-// Local store for all accounts
+// Local store for all accounts (antigravity-style: array + activeIndex)
 export interface AccountStore {
+  version: 2
+  accounts: StoredAccount[]
+  activeIndex: number
+  rotationIndex: number
+  lastRotation: number
+}
+
+// Legacy v1 store format (alias-keyed map)
+export interface AccountStoreV1 {
   accounts: Record<string, AccountCredentials>
   activeAlias: string | null
   rotationIndex: number
@@ -84,7 +100,7 @@ export interface PluginConfig {
   rotationStrategy: 'round-robin' | 'least-used' | 'random'
   autoRefreshTokens: boolean
   rateLimitCooldownMs: number // How long to skip rate-limited accounts
-  modelUnsupportedCooldownMs: number // How long to skip accounts that don't support the requested model
+  modelUnsupportedCooldownMs: number // How long to skip accounts that don't have the requested model
   workspaceDeactivatedCooldownMs: number // How long to skip accounts with deactivated workspaces
   modelFilter: RegExp // Which models to expose
 }

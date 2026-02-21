@@ -1,5 +1,5 @@
 import type { AccountCredentials } from './types.js';
-interface AuthorizationFlow {
+export interface AuthorizationFlow {
     pkce: {
         verifier: string;
         challenge: string;
@@ -10,8 +10,11 @@ interface AuthorizationFlow {
     redirectPort: number;
 }
 export declare function createAuthorizationFlow(): Promise<AuthorizationFlow>;
-export declare function loginAccount(alias?: string, flow?: AuthorizationFlow): Promise<AccountCredentials>;
-export declare function refreshToken(alias: string): Promise<AccountCredentials | null>;
-export declare function ensureValidToken(alias: string): Promise<string | null>;
-export {};
+/**
+ * Login a new account via OAuth. No alias required — accounts are identified by email.
+ * Deduplicates by email automatically (if same email logs in again, updates existing).
+ */
+export declare function loginAccount(flow?: AuthorizationFlow): Promise<AccountCredentials>;
+export declare function refreshToken(index: number): Promise<AccountCredentials | null>;
+export declare function ensureValidToken(index: number): Promise<string | null>;
 //# sourceMappingURL=auth.d.ts.map
