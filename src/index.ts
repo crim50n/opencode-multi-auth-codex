@@ -1,7 +1,7 @@
 import type { Plugin, PluginInput } from '@opencode-ai/plugin'
 import fs from 'node:fs'
 import { syncAuthFromOpenCode } from './auth-sync.js'
-import { createAuthorizationFlow, loginAccount } from './auth.js'
+import { createAuthorizationFlow, createDeviceAuthorizationFlow, loginAccount, loginAccountHeadless } from './auth.js'
 import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
 import {
   getNextAccount,
@@ -801,6 +801,36 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                   }
                 } catch (error) {
                   console.error('[multi-auth] OAuth authorize failed:', error)
+                  return { type: 'failed' as const }
+                }
+              }
+            }
+          }
+        },
+        {
+          label: 'ChatGPT OAuth (Headless)',
+          type: 'oauth' as const,
+
+          authorize: async () => {
+            const flow = await createDeviceAuthorizationFlow()
+
+            return {
+              url: flow.url,
+              method: 'auto' as const,
+              instructions: flow.instructions,
+
+              callback: async () => {
+                try {
+                  const account = await loginAccountHeadless(flow)
+                  return {
+                    type: 'success' as const,
+                    provider: PROVIDER_ID,
+                    refresh: account.refreshToken,
+                    access: account.accessToken,
+                    expires: account.expiresAt
+                  }
+                } catch (error) {
+                  console.error('[multi-auth] Headless OAuth authorize failed:', error)
                   return { type: 'failed' as const }
                 }
               }

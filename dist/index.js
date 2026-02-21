@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { syncAuthFromOpenCode } from './auth-sync.js';
-import { createAuthorizationFlow, loginAccount } from './auth.js';
+import { createAuthorizationFlow, createDeviceAuthorizationFlow, loginAccount, loginAccountHeadless } from './auth.js';
 import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js';
 import { getNextAccount, markAuthInvalid, markModelUnsupported, markRateLimited, markWorkspaceDeactivated } from './rotation.js';
 import { listAccounts, updateAccount } from './store.js';
@@ -682,6 +682,34 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                                 }
                                 catch (error) {
                                     console.error('[multi-auth] OAuth authorize failed:', error);
+                                    return { type: 'failed' };
+                                }
+                            }
+                        };
+                    }
+                },
+                {
+                    label: 'ChatGPT OAuth (Headless)',
+                    type: 'oauth',
+                    authorize: async () => {
+                        const flow = await createDeviceAuthorizationFlow();
+                        return {
+                            url: flow.url,
+                            method: 'auto',
+                            instructions: flow.instructions,
+                            callback: async () => {
+                                try {
+                                    const account = await loginAccountHeadless(flow);
+                                    return {
+                                        type: 'success',
+                                        provider: PROVIDER_ID,
+                                        refresh: account.refreshToken,
+                                        access: account.accessToken,
+                                        expires: account.expiresAt
+                                    };
+                                }
+                                catch (error) {
+                                    console.error('[multi-auth] Headless OAuth authorize failed:', error);
                                     return { type: 'failed' };
                                 }
                             }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { fileURLToPath } from 'node:url'
-import { loginAccount } from './auth.js'
+import { createDeviceAuthorizationFlow, loginAccount, loginAccountHeadless } from './auth.js'
 import { removeAccount, listAccounts, getStorePath, loadStore } from './store.js'
 import { startWebConsole } from './web.js'
 import { disableService, installService, serviceStatus } from './systemd.js'
@@ -20,6 +20,18 @@ async function main(): Promise<void> {
     case 'add':
     case 'login': {
       try {
+        const headless = args.includes('--headless')
+        if (headless) {
+          const flow = await createDeviceAuthorizationFlow()
+          console.log(`\nOpen: ${flow.url}`)
+          console.log(flow.instructions)
+          console.log('Waiting for authorization...')
+          const account = await loginAccountHeadless(flow)
+          console.log(`\nAccount added successfully!`)
+          console.log(`Email: ${account.email || 'unknown'}`)
+          break
+        }
+
         const account = await loginAccount()
         console.log(`\nAccount added successfully!`)
         console.log(`Email: ${account.email || 'unknown'}`)
@@ -158,6 +170,7 @@ opencode-multi-auth - Multi-account OAuth rotation for OpenAI Codex
 
 Commands:
   add              Add a new account (opens browser for OAuth)
+  add --headless   Add a new account via device-code flow
   remove <idx|email>  Remove an account by index or email
   list             List all configured accounts
   status           Show detailed account status

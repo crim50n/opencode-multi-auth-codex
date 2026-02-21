@@ -1,7 +1,6 @@
 import { generatePKCE } from '@openauthjs/openauth/pkce'
 import { randomBytes } from 'node:crypto'
 import * as http from 'http'
-import * as net from 'node:net'
 import * as url from 'url'
 import { addAccount, updateAccount, loadStore } from './store.js'
 import {
@@ -17,7 +16,12 @@ const OPENAI_ISSUER = 'https://auth.openai.com'
 const AUTHORIZE_URL = `${OPENAI_ISSUER}/oauth/authorize`
 const TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
-const DEFAULT_REDIRECT_PORT = 1455
+const OAUTH_PORT = 1455
+const DEVICE_CODE_URL = `${OPENAI_ISSUER}/api/accounts/deviceauth/usercode`
+const DEVICE_TOKEN_URL = `${OPENAI_ISSUER}/api/accounts/deviceauth/token`
+const DEVICE_REDIRECT_URI = `${OPENAI_ISSUER}/deviceauth/callback`
+const DEVICE_VERIFY_URL = `${OPENAI_ISSUER}/codex/device`
+const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 const SCOPES = ['openid', 'profile', 'email', 'offline_access']
 
 interface TokenResponse {
@@ -36,29 +40,33 @@ export interface AuthorizationFlow {
   redirectPort: number
 }
 
-async function reserveRedirectPort(preferredPort: number): Promise<number> {
-  const tryPort = (port: number) =>
-    new Promise<number>((resolve, reject) => {
-      const server = net.createServer()
-      server.once('error', reject)
-      server.listen(port, '127.0.0.1', () => {
-        const address = server.address()
-        const selected = typeof address === 'object' && address ? address.port : port
-        server.close(() => resolve(selected))
-      })
-    })
+export interface DeviceAuthorizationFlow {
+  deviceAuthId: string
+  userCode: string
+  intervalMs: number
+  url: string
+  instructions: string
+}
 
-  try {
-    return await tryPort(preferredPort)
-  } catch {
-    return await tryPort(0)
-  }
+interface DeviceAuthCodeResponse {
+  device_auth_id: string
+  user_code: string
+  interval?: string
+}
+
+interface DeviceAuthTokenResponse {
+  authorization_code: string
+  code_verifier: string
+}
+
+function generateState(): string {
+  return randomBytes(32).toString('base64url')
 }
 
 export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
   const pkce = await generatePKCE()
-  const state = randomBytes(16).toString('hex')
-  const redirectPort = await reserveRedirectPort(DEFAULT_REDIRECT_PORT)
+  const state = generateState()
+  const redirectPort = OAUTH_PORT
   const redirectUri = `http://localhost:${redirectPort}/auth/callback`
   const authUrl = new URL(AUTHORIZE_URL)
   authUrl.searchParams.set('client_id', CLIENT_ID)
@@ -67,13 +75,140 @@ export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
   authUrl.searchParams.set('scope', SCOPES.join(' '))
   authUrl.searchParams.set('code_challenge', pkce.challenge)
   authUrl.searchParams.set('code_challenge_method', 'S256')
-  authUrl.searchParams.set('state', state)
-  authUrl.searchParams.set('audience', 'https://api.openai.com/v1')
   authUrl.searchParams.set('id_token_add_organizations', 'true')
   authUrl.searchParams.set('codex_cli_simplified_flow', 'true')
-  authUrl.searchParams.set('originator', 'codex_cli_rs')
+  authUrl.searchParams.set('state', state)
+  authUrl.searchParams.set('originator', 'opencode')
 
   return { pkce, state, url: authUrl.toString(), redirectUri, redirectPort }
+}
+
+export async function createDeviceAuthorizationFlow(): Promise<DeviceAuthorizationFlow> {
+  const response = await fetch(DEVICE_CODE_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'opencode-multi-auth-codex'
+    },
+    body: JSON.stringify({ client_id: CLIENT_ID })
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to initiate device authorization: ${response.status}`)
+  }
+
+  const data = (await response.json()) as DeviceAuthCodeResponse
+  const intervalSeconds = Math.max(Number.parseInt(data.interval || '5', 10) || 5, 1)
+
+  return {
+    deviceAuthId: data.device_auth_id,
+    userCode: data.user_code,
+    intervalMs: intervalSeconds * 1000,
+    url: DEVICE_VERIFY_URL,
+    instructions: `Enter code: ${data.user_code}`
+  }
+}
+
+async function exchangeCodeForTokens(code: string, redirectUri: string, codeVerifier: string): Promise<TokenResponse> {
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      client_id: CLIENT_ID,
+      code_verifier: codeVerifier
+    }).toString()
+  })
+
+  if (!response.ok) {
+    throw new Error(`Token exchange failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<TokenResponse>
+}
+
+async function storeTokensAsAccount(tokens: TokenResponse): Promise<AccountCredentials> {
+  if (!tokens.refresh_token) {
+    throw new Error('Token response did not return a refresh_token')
+  }
+
+  const now = Date.now()
+  const accessClaims = decodeJwtPayload(tokens.access_token)
+  const idClaims = tokens.id_token ? decodeJwtPayload(tokens.id_token) : null
+  const expiresAt = getExpiryFromClaims(accessClaims) || getExpiryFromClaims(idClaims) || now + tokens.expires_in * 1000
+
+  let email: string | undefined = getEmailFromClaims(idClaims) || getEmailFromClaims(accessClaims)
+  try {
+    const userRes = await fetch(`${OPENAI_ISSUER}/userinfo`, {
+      headers: { Authorization: `Bearer ${tokens.access_token}` }
+    })
+    if (userRes.ok) {
+      const user = (await userRes.json()) as { email?: string }
+      email = user.email || email
+    }
+  } catch {
+    // user info fetch is non-critical
+  }
+
+  const accountId =
+    getAccountIdFromClaims(idClaims) ||
+    getAccountIdFromClaims(accessClaims)
+
+  const { store, index } = addAccount({
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    idToken: tokens.id_token,
+    accountId,
+    expiresAt,
+    email,
+    lastRefresh: new Date(now).toISOString(),
+    lastSeenAt: now,
+    addedAt: now,
+    source: 'opencode',
+    authInvalid: false,
+    authInvalidatedAt: undefined
+  })
+
+  const stored = store.accounts[index]
+  return {
+    ...stored,
+    alias: email?.split('@')[0] || `account-${index}`,
+    usageCount: stored.usageCount ?? 0
+  }
+}
+
+export async function loginAccountHeadless(flow: DeviceAuthorizationFlow): Promise<AccountCredentials> {
+  while (true) {
+    const response = await fetch(DEVICE_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'opencode-multi-auth-codex'
+      },
+      body: JSON.stringify({
+        device_auth_id: flow.deviceAuthId,
+        user_code: flow.userCode
+      })
+    })
+
+    if (response.ok) {
+      const deviceToken = (await response.json()) as DeviceAuthTokenResponse
+      const tokens = await exchangeCodeForTokens(
+        deviceToken.authorization_code,
+        DEVICE_REDIRECT_URI,
+        deviceToken.code_verifier
+      )
+      return storeTokensAsAccount(tokens)
+    }
+
+    if (response.status !== 403 && response.status !== 404) {
+      throw new Error(`Device authorization failed: ${response.status}`)
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, flow.intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS))
+  }
 }
 
 /**
@@ -106,6 +241,16 @@ export async function loginAccount(
       const parsedUrl = url.parse(req.url, true)
       const code = parsedUrl.query.code as string
       const returnedState = parsedUrl.query.state as string | undefined
+      const error = parsedUrl.query.error as string | undefined
+      const errorDescription = parsedUrl.query.error_description as string | undefined
+
+      if (error) {
+        res.writeHead(400)
+        res.end(`Authorization failed: ${errorDescription || error}`)
+        cleanup()
+        reject(new Error(errorDescription || error))
+        return
+      }
 
       if (!code) {
         res.writeHead(400)
@@ -123,79 +268,15 @@ export async function loginAccount(
       }
 
       try {
-        // Exchange code for tokens
-        const tokenRes = await fetch(TOKEN_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            grant_type: 'authorization_code',
-            client_id: CLIENT_ID,
-            code,
-            code_verifier: pkce.verifier,
-            redirect_uri: redirectUri
-          })
-        })
-
-        if (!tokenRes.ok) {
-          throw new Error(`Token exchange failed: ${tokenRes.status}`)
-        }
-
-        const tokens = (await tokenRes.json()) as TokenResponse
-        if (!tokens.refresh_token) {
-          throw new Error('Token exchange did not return a refresh_token')
-        }
-        const now = Date.now()
-        const accessClaims = decodeJwtPayload(tokens.access_token)
-        const idClaims = tokens.id_token ? decodeJwtPayload(tokens.id_token) : null
-        const expiresAt = getExpiryFromClaims(accessClaims) || getExpiryFromClaims(idClaims) || now + tokens.expires_in * 1000
-
-        let email: string | undefined = getEmailFromClaims(idClaims) || getEmailFromClaims(accessClaims)
-        try {
-          const userRes = await fetch(`${OPENAI_ISSUER}/userinfo`, {
-            headers: { Authorization: `Bearer ${tokens.access_token}` }
-          })
-          if (userRes.ok) {
-            const user = (await userRes.json()) as { email?: string }
-            email = user.email || email
-          }
-        } catch {
-          /* user info fetch is non-critical */
-        }
-
-        const accountId =
-          getAccountIdFromClaims(idClaims) ||
-          getAccountIdFromClaims(accessClaims)
-
-        // addAccount deduplicates by email automatically
-        const { store, index } = addAccount({
-          accessToken: tokens.access_token,
-          refreshToken: tokens.refresh_token,
-          idToken: tokens.id_token,
-          accountId,
-          expiresAt,
-          email,
-          lastRefresh: new Date(now).toISOString(),
-          lastSeenAt: now,
-          addedAt: now,
-          source: 'opencode',
-          authInvalid: false,
-          authInvalidatedAt: undefined
-        })
-
-        const stored = store.accounts[index]
-        const displayName = email || `account #${index}`
-        const account: AccountCredentials = {
-          ...stored,
-          alias: email?.split('@')[0] || `account-${index}`,
-          usageCount: stored.usageCount ?? 0
-        }
+        const tokens = await exchangeCodeForTokens(code, redirectUri, pkce.verifier)
+        const account = await storeTokensAsAccount(tokens)
 
         res.writeHead(200, { 'Content-Type': 'text/html' })
         res.end(`
           <html>
             <body style="font-family: system-ui; padding: 40px; text-align: center;">
               <h1>Account authenticated!</h1>
-              <p>${email || 'Unknown email'}</p>
+              <p>${account.email || 'Unknown email'}</p>
               <p>You can close this window.</p>
             </body>
           </html>
@@ -222,7 +303,7 @@ export async function loginAccount(
 
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        reject(new Error(`Port ${redirectPort} is in use. Stop conflicting process and retry.`))
+        reject(new Error(`Port ${redirectPort} is in use. Stop conflicting process and retry (same as OpenCode oauth callback).`))
       } else {
         reject(err)
       }

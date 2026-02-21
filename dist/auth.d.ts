@@ -9,7 +9,16 @@ export interface AuthorizationFlow {
     redirectUri: string;
     redirectPort: number;
 }
+export interface DeviceAuthorizationFlow {
+    deviceAuthId: string;
+    userCode: string;
+    intervalMs: number;
+    url: string;
+    instructions: string;
+}
 export declare function createAuthorizationFlow(): Promise<AuthorizationFlow>;
+export declare function createDeviceAuthorizationFlow(): Promise<DeviceAuthorizationFlow>;
+export declare function loginAccountHeadless(flow: DeviceAuthorizationFlow): Promise<AccountCredentials>;
 /**
  * Login a new account via OAuth. No alias required — accounts are identified by email.
  * Deduplicates by email automatically (if same email logs in again, updates existing).
