@@ -60,10 +60,10 @@ bun link
 
 ```bash
 # Add accounts one by one (run again for each account)
-opencode-multi-auth add
+opencode-multi-auth-codex add
 
 # optional: set custom alias explicitly
-opencode-multi-auth add work
+opencode-multi-auth-codex add --headless
 
 # Each command opens your browser - log in with a different ChatGPT account each time
 ```
@@ -71,7 +71,7 @@ opencode-multi-auth add work
 ## Verify Setup
 
 ```bash
-opencode-multi-auth status
+opencode-multi-auth-codex status
 ```
 
 Output:
@@ -103,7 +103,7 @@ Active: personal
 Launch the local dashboard:
 
 ```bash
-opencode-multi-auth web --port 3434 --host 127.0.0.1
+opencode-multi-auth-codex web --port 3434 --host 127.0.0.1
 ```
 
 Or from the repo:
@@ -145,14 +145,14 @@ If the store is encrypted and the passphrase is missing, the UI will show a lock
 Install and enable the user service:
 
 ```bash
-opencode-multi-auth service install --port 3434 --host 127.0.0.1
+opencode-multi-auth-codex service install --port 3434 --host 127.0.0.1
 ```
 
 Check status or disable:
 
 ```bash
-opencode-multi-auth service status
-opencode-multi-auth service disable
+opencode-multi-auth-codex service status
+opencode-multi-auth-codex service disable
 ```
 
 ### Logs
@@ -296,8 +296,8 @@ Optional fallback: use a file path plugin entry if installs are blocked:
 
 | Command | Description |
 |---------|-------------|
-| `add [alias]` | Add new account via OAuth (alias optional) |
-| `remove <alias>` | Remove an account |
+| `add` / `add --headless` | Add new account via browser or device-code flow |
+| `remove <idx\|email>` | Remove an account |
 | `list` | List all configured accounts |
 | `status` | Detailed status with usage counts |
 | `path` | Show config file location |

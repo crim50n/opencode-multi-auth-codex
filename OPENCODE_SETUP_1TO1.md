@@ -206,9 +206,9 @@ Repeat for each account.
 ### Option B: Plugin CLI
 
 ```bash
-opencode-multi-auth add
-opencode-multi-auth add
-opencode-multi-auth status
+opencode-multi-auth-codex add
+opencode-multi-auth-codex add --headless
+opencode-multi-auth-codex status
 ```
 
 Account store file:
@@ -253,7 +253,7 @@ Expected:
 Start local dashboard:
 
 ```bash
-opencode-multi-auth web --host 127.0.0.1 --port 3434
+opencode-multi-auth-codex web --host 127.0.0.1 --port 3434
 ```
 
 Open:

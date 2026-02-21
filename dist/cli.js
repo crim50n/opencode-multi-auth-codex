@@ -154,7 +154,7 @@ async function main() {
         case '-h':
         default: {
             console.log(`
-opencode-multi-auth - Multi-account OAuth rotation for OpenAI Codex
+ opencode-multi-auth-codex - Multi-account OAuth rotation for OpenAI Codex
 
 Commands:
   add              Add a new account (opens browser for OAuth)
@@ -168,12 +168,12 @@ Commands:
   help             Show this help message
 
 Examples:
-  opencode-multi-auth add
-  opencode-multi-auth remove 0
-  opencode-multi-auth remove user@example.com
-  opencode-multi-auth status
-  opencode-multi-auth web --port 3434 --host 127.0.0.1
-  opencode-multi-auth service install --port 3434 --host 127.0.0.1
+  opencode-multi-auth-codex add
+  opencode-multi-auth-codex remove 0
+  opencode-multi-auth-codex remove user@example.com
+  opencode-multi-auth-codex status
+  opencode-multi-auth-codex web --port 3434 --host 127.0.0.1
+  opencode-multi-auth-codex service install --port 3434 --host 127.0.0.1
 
 After adding accounts, the plugin auto-rotates between them.
 `);
