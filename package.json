@@ -1,6 +1,6 @@
 {
-  "name": "@guard22/opencode-multi-auth-codex",
-  "version": "1.0.10",
+  "name": "opencode-multi-auth-codex",
+  "version": "1.0.11",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,8 +30,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/guard22/opencode-multi-auth-codex"
+    "url": "https://github.com/crim50n/opencode-multi-auth-codex"
   },
+  "bugs": {
+    "url": "https://github.com/crim50n/opencode-multi-auth-codex/issues"
+  },
+  "homepage": "https://github.com/crim50n/opencode-multi-auth-codex#readme",
   "keywords": [
     "opencode",
     "openai",
@@ -39,6 +43,9 @@
     "oauth",
     "multi-account"
   ],
-  "author": "a3fckx",
-  "license": "MIT"
+  "author": "crim50n <crims0n@yandex.ru>",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -1,4 +1,4 @@
-# OpenCode Setup (1:1 with guard22)
+# OpenCode Setup (1:1 Reference Stack)
 
 This is a newcomer-friendly guide to set up OpenCode with the same stack I use:
 
@@ -40,13 +40,13 @@ If Node/Bun are missing, install them first.
 Install this repo into OpenCode's config directory:
 
 ```bash
-bun add github:guard22/opencode-multi-auth-codex#v1.0.9 --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
 ```
 
-If you prefer tracking `main` (not recommended for beginners):
+If you prefer always-updating installs (not recommended for beginners):
 
 ```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@latest --cwd ~/.config/opencode
 ```
 
 ## Optional Plugins (Same Stack)
@@ -87,7 +87,7 @@ Important:
     "oh-my-opencode@3.1.6",
     "opencode-antigravity-auth@1.4.5",
 
-    "file:///Users/YOUR_USER/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/index.js"
+    "opencode-multi-auth-codex@1.0.11"
   ],
 
   "permission": {
@@ -207,9 +207,9 @@ Repeat for each account.
 ### Option B: Plugin CLI
 
 ```bash
-node ~/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/cli.js add acc1
-node ~/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/cli.js add acc2
-node ~/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/cli.js status
+opencode-multi-auth add acc1
+opencode-multi-auth add acc2
+opencode-multi-auth status
 ```
 
 Account store file:
@@ -254,7 +254,7 @@ Expected:
 Start local dashboard:
 
 ```bash
-node ~/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/cli.js web --host 127.0.0.1 --port 3434
+opencode-multi-auth web --host 127.0.0.1 --port 3434
 ```
 
 Open:

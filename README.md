@@ -8,17 +8,17 @@ Multi-account OAuth rotation for OpenAI Codex. Auto-rotates between your ChatGPT
 
 This fork patches the plugin to talk to **ChatGPT Codex backend** (`chatgpt.com/backend-api`) with the same headers and request shape as the official Codex OAuth plugin.
 
-**Install from GitHub (recommended for this fork):**
+**Install from npm (recommended):**
 
 ```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
 ```
 
 Then set the plugin entry in `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
+  "plugin": ["opencode-multi-auth-codex@1.0.11"]
 }
 ```
 
@@ -26,13 +26,13 @@ If you already installed an older build, re-run the GitHub install command above
 
 ## Installation
 
-### Via GitHub (Recommended)
+### Via npm (Recommended)
 
 Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
+  "plugin": ["opencode-multi-auth-codex@1.0.11"]
 }
 ```
 
@@ -43,13 +43,13 @@ OpenCode will auto-install on first run.
 If auto-install fails, install manually:
 
 ```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/guard22/opencode-multi-auth-codex.git
+git clone https://github.com/crim50n/opencode-multi-auth-codex.git
 cd opencode-multi-auth-codex
 bun install
 bun run build
@@ -165,7 +165,7 @@ Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
+  "plugin": ["opencode-multi-auth-codex@1.0.11"]
 }
 ```
 
@@ -175,7 +175,7 @@ Or with other plugins:
 {
   "plugin": [
     "oh-my-opencode",
-    "github:guard22/opencode-multi-auth-codex"
+    "opencode-multi-auth-codex@1.0.11"
   ]
 }
 ```
@@ -242,16 +242,16 @@ Environment variables:
 
 ## Troubleshooting
 
-### BunInstallFailedError (DependencyLoop)
+### BunInstallFailedError (GitHub source)
 
 If OpenCode fails to boot with:
 
 ```
 BunInstallFailedError
-{ "pkg": "github:guard22/opencode-multi-auth-codex", "version": "latest" }
+{ "pkg": "github:crim50n/opencode-multi-auth-codex", "version": "latest" }
 ```
 
-It usually means an older `@a3fckx/opencode-multi-auth` dependency is still present.
+This usually happens with `github:` plugin sources on some OpenCode/Bun versions.
 
 Fix:
 
@@ -265,10 +265,10 @@ Fix:
 }
 ```
 
-2) Reinstall:
+2) Install from npm instead:
 
 ```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
 ```
 
 Optional fallback: use a file path plugin entry if installs are blocked:
@@ -276,7 +276,7 @@ Optional fallback: use a file path plugin entry if installs are blocked:
 ```json
 {
   "plugin": [
-    "file:///Users/<you>/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/index.js"
+    "file:///Users/<you>/.config/opencode/node_modules/opencode-multi-auth-codex/dist/index.js"
   ]
 }
 ```
