@@ -1,6 +1,7 @@
 import { generatePKCE } from '@openauthjs/openauth/pkce'
 import { randomBytes } from 'node:crypto'
 import * as http from 'http'
+import * as net from 'node:net'
 import * as url from 'url'
 import { addAccount, updateAccount, loadStore } from './store.js'
 import {
@@ -63,10 +64,29 @@ function generateState(): string {
   return randomBytes(32).toString('base64url')
 }
 
+async function reserveRedirectPort(preferredPort: number): Promise<number> {
+  const tryPort = (port: number) =>
+    new Promise<number>((resolve, reject) => {
+      const server = net.createServer()
+      server.once('error', reject)
+      server.listen(port, '127.0.0.1', () => {
+        const address = server.address()
+        const selected = typeof address === 'object' && address ? address.port : port
+        server.close(() => resolve(selected))
+      })
+    })
+
+  try {
+    return await tryPort(preferredPort)
+  } catch {
+    return await tryPort(0)
+  }
+}
+
 export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
   const pkce = await generatePKCE()
   const state = generateState()
-  const redirectPort = OAUTH_PORT
+  const redirectPort = await reserveRedirectPort(OAUTH_PORT)
   const redirectUri = `http://localhost:${redirectPort}/auth/callback`
   const authUrl = new URL(AUTHORIZE_URL)
   authUrl.searchParams.set('client_id', CLIENT_ID)

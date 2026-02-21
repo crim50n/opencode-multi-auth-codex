@@ -689,14 +689,14 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                     }
                 },
                 {
-                    label: 'ChatGPT OAuth (Headless)',
+                    label: 'ChatGPT OAuth (Headless, Multi-Account)',
                     type: 'oauth',
                     authorize: async () => {
                         const flow = await createDeviceAuthorizationFlow();
                         return {
                             url: flow.url,
                             method: 'auto',
-                            instructions: flow.instructions,
+                            instructions: `${flow.instructions} (will be saved to multi-account store)`,
                             callback: async () => {
                                 try {
                                     const account = await loginAccountHeadless(flow);
