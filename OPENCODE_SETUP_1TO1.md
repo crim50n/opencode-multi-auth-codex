@@ -40,7 +40,7 @@ If Node/Bun are missing, install them first.
 Install this repo into OpenCode's config directory:
 
 ```bash
-bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.13 --cwd ~/.config/opencode
 ```
 
 If you prefer always-updating installs (not recommended for beginners):
@@ -87,7 +87,7 @@ Important:
     "oh-my-opencode@3.1.6",
     "opencode-antigravity-auth@1.4.5",
 
-    "opencode-multi-auth-codex@1.0.11"
+    "opencode-multi-auth-codex@1.0.13"
   ],
 
   "permission": {

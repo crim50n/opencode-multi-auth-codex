@@ -11,14 +11,14 @@ This fork patches the plugin to talk to **ChatGPT Codex backend** (`chatgpt.com/
 **Install from npm (recommended):**
 
 ```bash
-bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.13 --cwd ~/.config/opencode
 ```
 
 Then set the plugin entry in `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-multi-auth-codex@1.0.11"]
+  "plugin": ["opencode-multi-auth-codex@1.0.13"]
 }
 ```
 
@@ -32,7 +32,7 @@ Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-multi-auth-codex@1.0.11"]
+  "plugin": ["opencode-multi-auth-codex@1.0.13"]
 }
 ```
 
@@ -43,7 +43,7 @@ OpenCode will auto-install on first run.
 If auto-install fails, install manually:
 
 ```bash
-bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.13 --cwd ~/.config/opencode
 ```
 
 ### From Source
@@ -166,7 +166,7 @@ Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-multi-auth-codex@1.0.11"]
+  "plugin": ["opencode-multi-auth-codex@1.0.13"]
 }
 ```
 
@@ -176,7 +176,7 @@ Or with other plugins:
 {
   "plugin": [
     "oh-my-opencode",
-    "opencode-multi-auth-codex@1.0.11"
+    "opencode-multi-auth-codex@1.0.13"
   ]
 }
 ```
@@ -269,7 +269,7 @@ Fix:
 2) Install from npm instead:
 
 ```bash
-bun add opencode-multi-auth-codex@1.0.11 --cwd ~/.config/opencode
+bun add opencode-multi-auth-codex@1.0.13 --cwd ~/.config/opencode
 ```
 
 Optional fallback: use a file path plugin entry if installs are blocked:

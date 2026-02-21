@@ -6,6 +6,8 @@ interface AuthorizationFlow {
     };
     state: string;
     url: string;
+    redirectUri: string;
+    redirectPort: number;
 }
 export declare function createAuthorizationFlow(): Promise<AuthorizationFlow>;
 export declare function loginAccount(alias?: string, flow?: AuthorizationFlow): Promise<AccountCredentials>;

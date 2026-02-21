@@ -1,6 +1,7 @@
 import { generatePKCE } from '@openauthjs/openauth/pkce';
 import { randomBytes } from 'node:crypto';
 import * as http from 'http';
+import * as net from 'node:net';
 import * as url from 'url';
 import { addAccount, updateAccount, loadStore } from './store.js';
 import { clearAuthInvalid } from './rotation.js';
@@ -10,15 +11,33 @@ const OPENAI_ISSUER = 'https://auth.openai.com';
 const AUTHORIZE_URL = `${OPENAI_ISSUER}/oauth/authorize`;
 const TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`;
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-const REDIRECT_PORT = 1455;
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/auth/callback`;
+const DEFAULT_REDIRECT_PORT = 1455;
 const SCOPES = ['openid', 'profile', 'email', 'offline_access'];
+async function reserveRedirectPort(preferredPort) {
+    const tryPort = (port) => new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.once('error', reject);
+        server.listen(port, '127.0.0.1', () => {
+            const address = server.address();
+            const selected = typeof address === 'object' && address ? address.port : port;
+            server.close(() => resolve(selected));
+        });
+    });
+    try {
+        return await tryPort(preferredPort);
+    }
+    catch {
+        return await tryPort(0);
+    }
+}
 export async function createAuthorizationFlow() {
     const pkce = await generatePKCE();
     const state = randomBytes(16).toString('hex');
+    const redirectPort = await reserveRedirectPort(DEFAULT_REDIRECT_PORT);
+    const redirectUri = `http://localhost:${redirectPort}/auth/callback`;
     const authUrl = new URL(AUTHORIZE_URL);
     authUrl.searchParams.set('client_id', CLIENT_ID);
-    authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('scope', SCOPES.join(' '));
     authUrl.searchParams.set('code_challenge', pkce.challenge);
@@ -28,7 +47,7 @@ export async function createAuthorizationFlow() {
     authUrl.searchParams.set('id_token_add_organizations', 'true');
     authUrl.searchParams.set('codex_cli_simplified_flow', 'true');
     authUrl.searchParams.set('originator', 'codex_cli_rs');
-    return { pkce, state, url: authUrl.toString() };
+    return { pkce, state, url: authUrl.toString(), redirectUri, redirectPort };
 }
 function normalizeAlias(value) {
     const normalized = value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
@@ -51,7 +70,7 @@ function resolveAlias(preferredAlias, email) {
 }
 export async function loginAccount(alias, flow) {
     const activeFlow = flow ?? await createAuthorizationFlow();
-    const { pkce, state } = activeFlow;
+    const { pkce, state, redirectUri, redirectPort } = activeFlow;
     return new Promise((resolve, reject) => {
         let server = null;
         const cleanup = () => {
@@ -93,7 +112,7 @@ export async function loginAccount(alias, flow) {
                         client_id: CLIENT_ID,
                         code,
                         code_verifier: pkce.verifier,
-                        redirect_uri: REDIRECT_URI
+                        redirect_uri: redirectUri
                     })
                 });
                 if (!tokenRes.ok) {
@@ -157,16 +176,16 @@ export async function loginAccount(alias, flow) {
                 reject(err);
             }
         });
-        server.listen(REDIRECT_PORT, () => {
+        server.listen(redirectPort, () => {
             const displayAlias = alias && alias.trim().length > 0 ? alias.trim() : 'auto-generated';
             console.log(`\n[multi-auth] Login for account "${displayAlias}"`);
             console.log(`[multi-auth] Open this URL in your browser:\n`);
             console.log(`  ${activeFlow.url}\n`);
-            console.log(`[multi-auth] Waiting for callback on port ${REDIRECT_PORT}...`);
+            console.log(`[multi-auth] Waiting for callback on port ${redirectPort}...`);
         });
         server.on('error', (err) => {
             if (err.code === 'EADDRINUSE') {
-                reject(new Error(`Port ${REDIRECT_PORT} is in use. Stop Codex CLI if running.`));
+                reject(new Error(`Port ${redirectPort} is in use. Stop conflicting process and retry.`));
             }
             else {
                 reject(err);

@@ -822,7 +822,8 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                     access: account.accessToken,
                     expires: account.expiresAt
                   }
-                } catch {
+                } catch (error) {
+                  console.error('[multi-auth] OAuth authorize failed:', error)
                   return { type: 'failed' as const }
                 }
               }

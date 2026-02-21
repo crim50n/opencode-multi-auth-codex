@@ -702,7 +702,8 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                                         expires: account.expiresAt
                                     };
                                 }
-                                catch {
+                                catch (error) {
+                                    console.error('[multi-auth] OAuth authorize failed:', error);
                                     return { type: 'failed' };
                                 }
                             }
