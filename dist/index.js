@@ -1,654 +1,119 @@
-import fs from 'node:fs';
-import { syncAuthFromOpenCode } from './auth-sync.js';
 import { createAuthorizationFlow, createDeviceAuthorizationFlow, loginAccount, loginAccountHeadless } from './auth.js';
-import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js';
 import { getNextAccount, markAuthInvalid, markModelUnsupported, markRateLimited, markWorkspaceDeactivated } from './rotation.js';
-import { listAccounts, updateAccount } from './store.js';
 import { DEFAULT_CONFIG } from './types.js';
 const PROVIDER_ID = 'openai';
 const CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
-const URL_PATHS = {
-    RESPONSES: '/responses',
-    CODEX_RESPONSES: '/codex/responses'
-};
-const OPENAI_HEADERS = {
-    BETA: 'OpenAI-Beta',
-    ACCOUNT_ID: 'chatgpt-account-id',
-    ORIGINATOR: 'originator',
-    SESSION_ID: 'session_id',
-    CONVERSATION_ID: 'conversation_id'
-};
-const OPENAI_HEADER_VALUES = {
-    BETA_RESPONSES: 'responses=experimental',
-    ORIGINATOR_CODEX: 'codex_cli_rs'
-};
 const JWT_CLAIM_PATH = 'https://api.openai.com/auth';
 let pluginConfig = { ...DEFAULT_CONFIG };
-function configure(config) {
-    pluginConfig = { ...pluginConfig, ...config };
-}
 function decodeJWT(token) {
     try {
         const parts = token.split('.');
         if (parts.length !== 3)
             return null;
-        const payload = parts[1];
-        const decoded = Buffer.from(payload, 'base64').toString('utf-8');
-        return JSON.parse(decoded);
+        return JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
     }
     catch {
         return null;
     }
 }
-function extractRequestUrl(input) {
-    if (typeof input === 'string')
-        return input;
-    if (input instanceof URL)
-        return input.toString();
-    return input.url;
-}
-function extractPathAndSearch(url) {
-    try {
-        const u = new URL(url);
-        return `${u.pathname}${u.search}`;
-    }
-    catch {
-        // best-effort fallback
-    }
-    const trimmed = String(url || '').trim();
-    if (trimmed.startsWith('/'))
-        return trimmed;
-    const firstSlash = trimmed.indexOf('/');
-    if (firstSlash >= 0)
-        return trimmed.slice(firstSlash);
-    return trimmed;
-}
-function toCodexBackendUrl(originalUrl) {
-    const pathAndSearch = extractPathAndSearch(originalUrl);
-    // Map OpenAI v1 endpoints to ChatGPT Codex endpoints.
-    let mapped = pathAndSearch;
-    if (mapped.includes(URL_PATHS.RESPONSES)) {
-        mapped = mapped.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES);
-    }
-    else if (mapped.includes('/chat/completions')) {
-        mapped = mapped.replace('/chat/completions', '/codex/chat/completions');
-    }
-    return new URL(mapped, CODEX_BASE_URL).toString();
-}
-function filterInput(input) {
-    if (!Array.isArray(input))
-        return input;
-    return input
-        .filter((item) => item?.type !== 'item_reference')
-        .map((item) => {
-        if (item && typeof item === 'object' && 'id' in item) {
-            const { id, ...rest } = item;
-            return rest;
-        }
-        return item;
-    });
+function mapUrl(original) {
+    const parsed = new URL(original);
+    if (parsed.pathname.includes('/responses'))
+        parsed.pathname = parsed.pathname.replace('/responses', '/codex/responses');
+    if (parsed.pathname.includes('/chat/completions'))
+        parsed.pathname = parsed.pathname.replace('/chat/completions', '/codex/chat/completions');
+    return new URL(`${parsed.pathname}${parsed.search}`, CODEX_BASE_URL).toString();
 }
 function normalizeModel(model) {
     if (!model)
-        return 'gpt-5.1';
-    const modelId = model.includes('/') ? model.split('/').pop() : model;
-    const baseModel = modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '');
-    const preferLatestRaw = process.env.OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST;
-    const preferLatest = preferLatestRaw !== '0' && preferLatestRaw !== 'false';
-    if (preferLatest && (baseModel === 'gpt-5.2-codex' || baseModel === 'gpt-5-codex')) {
-        const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
-        if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
-            console.log(`[multi-auth] model map: ${baseModel} -> ${latestModel}`);
-        }
-        return latestModel;
-    }
-    return baseModel;
+        return 'gpt-5.3-codex';
+    const id = model.includes('/') ? model.split('/').pop() || model : model;
+    return id.replace(/-(none|low|medium|high|xhigh)$/i, '');
 }
-function ensureContentType(headers) {
-    const responseHeaders = new Headers(headers);
-    if (!responseHeaders.has('content-type')) {
-        responseHeaders.set('content-type', 'text/event-stream; charset=utf-8');
-    }
-    return responseHeaders;
-}
-function parseSseStream(sseText) {
-    const lines = sseText.split('\n');
-    for (const line of lines) {
-        if (!line.startsWith('data: '))
-            continue;
-        try {
-            const data = JSON.parse(line.substring(6));
-            if (data?.type === 'response.done' || data?.type === 'response.completed') {
-                return data.response;
-            }
-        }
-        catch {
-            // ignore malformed chunks
-        }
-    }
-    return null;
-}
-async function convertSseToJson(response, headers) {
-    if (!response.body) {
-        throw new Error('[multi-auth] Response has no body');
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let fullText = '';
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done)
-            break;
-        fullText += decoder.decode(value, { stream: true });
-    }
-    const finalResponse = parseSseStream(fullText);
-    if (!finalResponse) {
-        return new Response(fullText, {
-            status: response.status,
-            statusText: response.statusText,
-            headers
-        });
-    }
-    const jsonHeaders = new Headers(headers);
-    jsonHeaders.set('content-type', 'application/json; charset=utf-8');
-    return new Response(JSON.stringify(finalResponse), {
-        status: response.status,
-        statusText: response.statusText,
-        headers: jsonHeaders
+function jsonError(status, message) {
+    return new Response(JSON.stringify({ error: { message } }), {
+        status,
+        headers: { 'Content-Type': 'application/json' }
     });
 }
-/**
- * Multi-account OAuth plugin for OpenCode (antigravity-style)
- *
- * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
- * Accounts are identified by email, stored in an array with activeIndex.
- */
-const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => {
-    const terminalNotifierPath = (() => {
-        const candidates = [
-            '/opt/homebrew/bin/terminal-notifier',
-            '/usr/local/bin/terminal-notifier'
-        ];
-        for (const c of candidates) {
-            try {
-                if (fs.existsSync(c))
-                    return c;
-            }
-            catch {
-                // ignore
-            }
-        }
-        return null;
-    })();
-    const notifyEnabledRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY;
-    const notifyEnabled = notifyEnabledRaw !== '0' && notifyEnabledRaw !== 'false';
-    const notifySound = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_SOUND || '/System/Library/Sounds/Glass.aiff').trim();
-    const lastStatusBySession = new Map();
-    const lastNotifiedAtByKey = new Map();
-    const lastRetryAttemptBySession = new Map();
-    const escapeAppleScriptString = (value) => {
-        return String(value)
-            .replaceAll('\\', '\\\\')
-            .replaceAll('"', '\"')
-            .replaceAll(String.fromCharCode(10), '\n');
-    };
-    let didWarnTerminalNotifier = false;
-    const notifyMac = (title, message, clickUrl) => {
-        if (!notifyEnabled)
-            return;
-        if (process.platform !== 'darwin')
-            return;
-        const macOpenRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN;
-        const macOpenEnabled = macOpenRaw !== '0' && macOpenRaw !== 'false';
-        if (macOpenEnabled && clickUrl && terminalNotifierPath) {
-            try {
-                $ `${terminalNotifierPath} -title ${title} -message ${message} -open ${clickUrl}`
-                    .nothrow()
-                    .catch(() => { });
-            }
-            catch {
-                // ignore
-            }
-        }
-        else {
-            if (macOpenEnabled && clickUrl && !terminalNotifierPath && !didWarnTerminalNotifier) {
-                didWarnTerminalNotifier = true;
-                if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
-                    console.log('[multi-auth] mac click-to-open requires terminal-notifier (brew install terminal-notifier)');
-                }
-            }
-            try {
-                const osascript = '/usr/bin/osascript';
-                const safeTitle = escapeAppleScriptString(title);
-                const safeMessage = escapeAppleScriptString(message);
-                const script = `display notification "${safeMessage}" with title "${safeTitle}"`;
-                $ `${osascript} -e ${script}`.nothrow().catch(() => { });
-            }
-            catch {
-                // ignore
-            }
-        }
-        if (!notifySound)
-            return;
-        try {
-            const afplay = '/usr/bin/afplay';
-            $ `${afplay} ${notifySound}`.nothrow().catch(() => { });
-        }
-        catch {
-            // ignore
-        }
-    };
-    const ntfyUrl = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_NTFY_URL || '').trim();
-    const ntfyToken = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_NTFY_TOKEN || '').trim();
-    const notifyUiBaseUrl = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_UI_BASE_URL || '').trim();
-    const getSessionUrl = (sessionID) => {
-        const base = (notifyUiBaseUrl || serverUrl?.origin || '').replace(/\/$/, '');
-        if (!base)
-            return '';
-        return `${base}/session/${sessionID}`;
-    };
-    const projectLabel = (project?.name || project?.id || '').trim() || 'OpenCode';
-    const sessionMetaCache = new Map();
-    const getSessionMeta = async (sessionID) => {
-        const cached = sessionMetaCache.get(sessionID);
-        if (cached?.title)
-            return cached;
-        try {
-            const res = await client.session.get({
-                path: { id: sessionID },
-                query: { directory }
-            });
-            const data = res?.data;
-            const meta = { title: data?.title };
-            sessionMetaCache.set(sessionID, meta);
-            return meta;
-        }
-        catch {
-            const meta = cached || {};
-            sessionMetaCache.set(sessionID, meta);
-            return meta;
-        }
-    };
-    const formatTitle = (kind) => {
-        if (kind === 'error')
-            return `OpenCode - ${projectLabel} - Error`;
-        if (kind === 'retry')
-            return `OpenCode - ${projectLabel} - Retrying`;
-        return `OpenCode - ${projectLabel}`;
-    };
-    const formatBody = async (kind, sessionID, detail) => {
-        const meta = await getSessionMeta(sessionID);
-        const titleLine = meta.title ? `Task: ${meta.title}` : '';
-        const url = getSessionUrl(sessionID);
-        if (kind === 'idle') {
-            return [titleLine, `Session finished: ${sessionID}`, detail || '', url].filter(Boolean).join('\n');
-        }
-        if (kind === 'retry') {
-            return [titleLine, `Retrying: ${sessionID}`, detail || '', url].filter(Boolean).join('\n');
-        }
-        return [titleLine, `Error: ${sessionID}`, detail || '', url].filter(Boolean).join('\n');
-    };
-    const notifyMacRich = async (kind, sessionID, detail) => {
-        const body = await formatBody(kind, sessionID, detail);
-        notifyMac(formatTitle(kind), body, getSessionUrl(sessionID) || undefined);
-    };
-    const notifyNtfyRich = async (kind, sessionID, detail) => {
-        if (!notifyEnabled)
-            return;
-        if (!ntfyUrl)
-            return;
-        const sessionUrl = getSessionUrl(sessionID);
-        const title = formatTitle(kind);
-        const body = await formatBody(kind, sessionID, detail);
-        const priority = kind === 'error' ? '5' : kind === 'retry' ? '4' : '3';
-        const headers = {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Title': title,
-            'Priority': priority
-        };
-        if (sessionUrl)
-            headers['Click'] = sessionUrl;
-        if (ntfyToken)
-            headers['Authorization'] = `Bearer ${ntfyToken}`;
-        try {
-            await fetch(ntfyUrl, { method: 'POST', headers, body });
-        }
-        catch {
-            // ignore
-        }
-    };
-    const shouldThrottle = (key, minMs) => {
-        const last = lastNotifiedAtByKey.get(key) || 0;
-        const now = Date.now();
-        if (now - last < minMs)
-            return true;
-        lastNotifiedAtByKey.set(key, now);
-        return false;
-    };
-    const formatRetryDetail = (status) => {
-        const attempt = typeof status?.attempt === 'number' ? status.attempt : undefined;
-        const message = typeof status?.message === 'string' ? status.message : '';
-        const next = typeof status?.next === 'number' ? status.next : undefined;
-        const parts = [];
-        if (typeof attempt === 'number')
-            parts.push(`Attempt: ${attempt}`);
-        if (typeof next === 'number') {
-            const seconds = next > 1e12 ? Math.max(0, Math.round((next - Date.now()) / 1000)) : Math.max(0, Math.round(next));
-            parts.push(`Next in: ${seconds}s`);
-        }
-        if (message)
-            parts.push(message);
-        return parts.join(' | ');
-    };
-    const formatErrorDetail = (err) => {
-        if (!err || typeof err !== 'object')
-            return '';
-        const name = typeof err.name === 'string' ? err.name : '';
-        const code = typeof err.code === 'string' ? err.code : '';
-        const message = (typeof err.message === 'string' && err.message) ||
-            (typeof err.error?.message === 'string' && err.error.message) ||
-            '';
-        return [name, code, message].filter(Boolean).join(': ');
-    };
-    const notifyRich = async (kind, sessionID, detail) => {
-        try {
-            await notifyMacRich(kind, sessionID, detail);
-        }
-        catch {
-            // ignore
-        }
-        try {
-            await notifyNtfyRich(kind, sessionID, detail);
-        }
-        catch {
-            // ignore
-        }
-    };
+async function parseJson(response) {
+    return response.clone().json().catch(() => ({}));
+}
+const plugin = async (_input) => {
     return {
-        event: async ({ event }) => {
-            if (!notifyEnabled)
-                return;
-            if (!event || !('type' in event))
-                return;
-            if (event.type === 'session.created' || event.type === 'session.updated') {
-                const info = event.properties?.info;
-                const id = info?.id;
-                if (id) {
-                    sessionMetaCache.set(id, { title: info?.title });
-                }
-                return;
-            }
-            if (event.type === 'session.status') {
-                const sessionID = event.properties?.sessionID;
-                const status = event.properties?.status;
-                const statusType = status?.type;
-                if (!sessionID || !statusType)
-                    return;
-                lastStatusBySession.set(sessionID, statusType);
-                if (statusType === 'retry') {
-                    const attempt = typeof status?.attempt === 'number' ? status.attempt : undefined;
-                    const prevAttempt = lastRetryAttemptBySession.get(sessionID);
-                    if (typeof attempt === 'number') {
-                        if (prevAttempt === attempt && shouldThrottle(`retry:${sessionID}:${attempt}`, 5000)) {
-                            return;
-                        }
-                        lastRetryAttemptBySession.set(sessionID, attempt);
-                    }
-                    const key = `retry:${sessionID}:${typeof attempt === 'number' ? attempt : 'na'}`;
-                    if (shouldThrottle(key, 2000))
-                        return;
-                    await notifyRich('retry', sessionID, formatRetryDetail(status));
-                }
-                return;
-            }
-            if (event.type === 'session.error') {
-                const sessionID = event.properties?.sessionID;
-                const id = sessionID || 'unknown';
-                const err = event.properties?.error;
-                const detail = formatErrorDetail(err);
-                const key = `error:${id}:${detail}`;
-                if (shouldThrottle(key, 2000))
-                    return;
-                await notifyRich('error', id, detail);
-                return;
-            }
-            if (event.type === 'session.idle') {
-                const sessionID = event.properties?.sessionID;
-                if (!sessionID)
-                    return;
-                const prev = lastStatusBySession.get(sessionID);
-                if (prev === 'busy' || prev === 'retry') {
-                    if (shouldThrottle(`idle:${sessionID}`, 2000))
-                        return;
-                    await notifyRich('idle', sessionID);
-                }
-                lastStatusBySession.set(sessionID, 'idle');
-            }
-        },
-        config: async (config) => {
-            const injectModelsRaw = process.env.OPENCODE_MULTI_AUTH_INJECT_MODELS;
-            const injectModels = injectModelsRaw === '1' || injectModelsRaw === 'true';
-            if (!injectModels)
-                return;
-            const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
-            try {
-                const openai = config.provider?.[PROVIDER_ID] || null;
-                if (!openai || typeof openai !== 'object')
-                    return;
-                openai.models ||= {};
-                if (!openai.models[latestModel]) {
-                    openai.models[latestModel] = {
-                        id: latestModel,
-                        name: 'GPT-5.3 Codex',
-                        reasoning: true,
-                        tool_call: true,
-                        temperature: true,
-                        limit: {
-                            context: 200000,
-                            output: 8192
-                        }
-                    };
-                }
-                if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
-                    console.log(`[multi-auth] injected ${latestModel} into runtime config`);
-                }
-            }
-            catch (err) {
-                if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
-                    console.log('[multi-auth] config injection failed:', err);
-                }
-            }
-        },
         auth: {
             provider: PROVIDER_ID,
-            /**
-             * Loader configures the SDK with multi-account rotation
-             */
-            async loader(getAuth, provider) {
-                await syncAuthFromOpenCode(getAuth);
-                const accounts = listAccounts();
-                if (accounts.length === 0) {
-                    console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add');
-                    return {};
-                }
-                // Custom fetch with multi-account rotation
+            async loader() {
                 const customFetch = async (input, init) => {
-                    await syncAuthFromOpenCode(getAuth);
-                    const rotation = await getNextAccount(pluginConfig);
-                    if (!rotation) {
-                        return new Response(JSON.stringify({ error: { message: 'No available accounts' } }), { status: 503, headers: { 'Content-Type': 'application/json' } });
-                    }
-                    const { account, token, index: accountIndex } = rotation;
-                    const label = account.email || `#${accountIndex}`;
-                    const decoded = decodeJWT(token);
-                    const accountId = decoded?.[JWT_CLAIM_PATH]?.chatgpt_account_id;
-                    if (!accountId) {
-                        return new Response(JSON.stringify({ error: { message: '[multi-auth] Failed to extract accountId from token' } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
-                    }
-                    const originalUrl = extractRequestUrl(input);
-                    const url = toCodexBackendUrl(originalUrl);
-                    let body = {};
-                    try {
-                        body = init?.body ? JSON.parse(init.body) : {};
-                    }
-                    catch {
-                        body = {};
-                    }
-                    const isStreaming = body?.stream === true;
-                    const normalizedModel = normalizeModel(body.model);
-                    const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/);
-                    const payload = {
-                        ...body,
-                        model: normalizedModel,
-                        store: false
-                    };
-                    if (payload.truncation === undefined) {
-                        const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || '').trim();
-                        if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
-                            payload.truncation = truncationRaw;
+                    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+                    const attempts = Math.max(pluginConfig.maxRetries, 1) + 1;
+                    for (let i = 0; i < attempts; i += 1) {
+                        const selected = await getNextAccount(pluginConfig);
+                        if (!selected)
+                            return jsonError(503, 'No available accounts');
+                        const claims = decodeJWT(selected.token);
+                        const authClaim = claims?.[JWT_CLAIM_PATH];
+                        const accountId = authClaim?.chatgpt_account_id;
+                        if (!accountId) {
+                            markAuthInvalid(selected.index);
+                            continue;
                         }
-                    }
-                    if (payload.input) {
-                        payload.input = filterInput(payload.input);
-                    }
-                    if (reasoningMatch?.[1]) {
-                        payload.reasoning = {
-                            ...(payload.reasoning || {}),
-                            effort: reasoningMatch[1],
-                            summary: payload.reasoning?.summary || 'auto'
-                        };
-                    }
-                    delete payload.reasoning_effort;
-                    try {
                         const headers = new Headers(init?.headers || {});
-                        headers.delete('x-api-key');
+                        headers.set('Authorization', `Bearer ${selected.token}`);
                         headers.set('Content-Type', 'application/json');
-                        headers.set('Authorization', `Bearer ${token}`);
-                        headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
-                        headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
-                        headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
-                        const cacheKey = payload?.prompt_cache_key;
-                        if (cacheKey) {
-                            headers.set(OPENAI_HEADERS.CONVERSATION_ID, cacheKey);
-                            headers.set(OPENAI_HEADERS.SESSION_ID, cacheKey);
+                        headers.set('chatgpt-account-id', accountId);
+                        headers.set('OpenAI-Beta', 'responses=experimental');
+                        headers.set('originator', 'codex_cli_rs');
+                        let body = {};
+                        try {
+                            body = init?.body ? JSON.parse(init.body) : {};
                         }
-                        else {
-                            headers.delete(OPENAI_HEADERS.CONVERSATION_ID);
-                            headers.delete(OPENAI_HEADERS.SESSION_ID);
+                        catch {
+                            body = {};
                         }
-                        headers.set('accept', 'text/event-stream');
-                        const res = await fetch(url, {
+                        const payload = {
+                            ...body,
+                            model: normalizeModel(body.model),
+                            store: false
+                        };
+                        const response = await fetch(mapUrl(url), {
                             method: init?.method || 'POST',
                             headers,
                             body: JSON.stringify(payload)
                         });
-                        const limitUpdate = extractRateLimitUpdate(res.headers);
-                        if (limitUpdate) {
-                            updateAccount(accountIndex, {
-                                rateLimits: mergeRateLimits(account.rateLimits, limitUpdate)
-                            });
+                        if (response.status === 401 || response.status === 403) {
+                            markAuthInvalid(selected.index);
+                            continue;
                         }
-                        // Handle auth failures with automatic rotation
-                        if (res.status === 401 || res.status === 403) {
-                            const errorData = await res.clone().json().catch(() => ({}));
-                            const message = errorData?.error?.message || '';
-                            if (message.toLowerCase().includes('invalidated') || res.status === 401) {
-                                markAuthInvalid(accountIndex);
-                            }
-                            const retryRotation = await getNextAccount(pluginConfig);
-                            if (retryRotation && retryRotation.index !== accountIndex) {
-                                return customFetch(input, init);
-                            }
-                            return new Response(JSON.stringify({
-                                error: {
-                                    message: `[multi-auth][${label}] Unauthorized on all accounts. ${message}`.trim()
-                                }
-                            }), { status: res.status, headers: { 'Content-Type': 'application/json' } });
+                        if (response.status === 429) {
+                            markRateLimited(selected.index, pluginConfig.rateLimitCooldownMs);
+                            continue;
                         }
-                        if (res.status === 429) {
-                            markRateLimited(accountIndex, pluginConfig.rateLimitCooldownMs);
-                            // Try another account
-                            const retryRotation = await getNextAccount(pluginConfig);
-                            if (retryRotation && retryRotation.index !== accountIndex) {
-                                return customFetch(input, init);
-                            }
-                            // All accounts exhausted
-                            const errorData = await res.json().catch(() => ({}));
-                            return new Response(JSON.stringify({
-                                error: {
-                                    message: `[multi-auth][${label}] Rate limited on all accounts. ${errorData.error?.message || ''}`
-                                }
-                            }), { status: 429, headers: { 'Content-Type': 'application/json' } });
-                        }
-                        if (res.status === 402) {
-                            const errorData = await res.clone().json().catch(() => null);
-                            const errorText = await res.clone().text().catch(() => '');
-                            const code = (typeof errorData?.detail?.code === 'string' && errorData.detail.code) ||
-                                (typeof errorData?.error?.code === 'string' && errorData.error.code) ||
-                                '';
-                            const message = (typeof errorData?.detail?.message === 'string' && errorData.detail.message) ||
-                                (typeof errorData?.detail === 'string' && errorData.detail) ||
-                                (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
-                                (typeof errorData?.message === 'string' && errorData.message) ||
-                                errorText ||
-                                '';
-                            const isDeactivatedWorkspace = code === 'deactivated_workspace' ||
-                                message.toLowerCase().includes('deactivated_workspace') ||
-                                message.toLowerCase().includes('deactivated workspace');
-                            if (isDeactivatedWorkspace) {
-                                markWorkspaceDeactivated(accountIndex, pluginConfig.workspaceDeactivatedCooldownMs, {
-                                    error: message || code
-                                });
-                                const retryRotation = await getNextAccount(pluginConfig);
-                                if (retryRotation && retryRotation.index !== accountIndex) {
-                                    return customFetch(input, init);
-                                }
-                                return new Response(JSON.stringify({
-                                    error: {
-                                        message: `[multi-auth][${label}] Workspace deactivated on all accounts. ${message || code}`.trim()
-                                    }
-                                }), { status: 402, headers: { 'Content-Type': 'application/json' } });
+                        if (response.status === 402) {
+                            const data = await parseJson(response);
+                            const detail = data.detail;
+                            const code = typeof detail?.code === 'string' ? detail.code : '';
+                            if (code === 'deactivated_workspace') {
+                                markWorkspaceDeactivated(selected.index, pluginConfig.workspaceDeactivatedCooldownMs);
+                                continue;
                             }
                         }
-                        if (res.status === 400) {
-                            const errorData = await res.clone().json().catch(() => ({}));
-                            const message = (typeof errorData?.detail === 'string' && errorData.detail) ||
-                                (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
-                                (typeof errorData?.message === 'string' && errorData.message) ||
-                                '';
-                            const isModelUnsupported = typeof message === 'string' &&
-                                message.toLowerCase().includes('model is not supported') &&
-                                message.toLowerCase().includes('chatgpt account');
-                            if (isModelUnsupported) {
-                                markModelUnsupported(accountIndex, pluginConfig.modelUnsupportedCooldownMs, {
-                                    model: normalizedModel,
-                                    error: message
-                                });
-                                const retryRotation = await getNextAccount(pluginConfig);
-                                if (retryRotation && retryRotation.index !== accountIndex) {
-                                    return customFetch(input, init);
-                                }
-                                return new Response(JSON.stringify({
-                                    error: {
-                                        message: `[multi-auth] Model not supported on all accounts. ${message}`.trim()
-                                    }
-                                }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+                        if (response.status === 400) {
+                            const data = await parseJson(response);
+                            const message = typeof data.message === 'string'
+                                ? data.message
+                                : typeof data.error?.message === 'string'
+                                    ? data.error.message
+                                    : '';
+                            if (message.toLowerCase().includes('model is not supported')) {
+                                markModelUnsupported(selected.index, pluginConfig.modelUnsupportedCooldownMs);
+                                continue;
                             }
                         }
-                        if (!res.ok) {
-                            return res;
-                        }
-                        const responseHeaders = ensureContentType(res.headers);
-                        if (!isStreaming && responseHeaders.get('content-type')?.includes('text/event-stream')) {
-                            return await convertSseToJson(res, responseHeaders);
-                        }
-                        return res;
+                        return response;
                     }
-                    catch (err) {
-                        return new Response(JSON.stringify({ error: { message: `[multi-auth] Request failed: ${err}` } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
-                    }
+                    return jsonError(503, 'No available accounts after retries');
                 };
-                // Return SDK configuration with custom fetch for rotation
                 return {
                     apiKey: 'chatgpt-oauth',
                     baseURL: CODEX_BASE_URL,
@@ -659,16 +124,12 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                 {
                     label: 'ChatGPT OAuth (Multi-Account)',
                     type: 'oauth',
-                    /**
-                     * OAuth flow - opens browser for ChatGPT login.
-                     * No alias prompt — accounts identified by email automatically.
-                     */
                     authorize: async () => {
                         const flow = await createAuthorizationFlow();
                         return {
                             url: flow.url,
                             method: 'auto',
-                            instructions: 'Login with your ChatGPT Plus/Pro account',
+                            instructions: 'Login with your ChatGPT account',
                             callback: async () => {
                                 try {
                                     const account = await loginAccount(flow);
@@ -680,8 +141,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                                         expires: account.expiresAt
                                     };
                                 }
-                                catch (error) {
-                                    console.error('[multi-auth] OAuth authorize failed:', error);
+                                catch {
                                     return { type: 'failed' };
                                 }
                             }
@@ -696,7 +156,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                         return {
                             url: flow.url,
                             method: 'auto',
-                            instructions: `${flow.instructions} (will be saved to multi-account store)`,
+                            instructions: flow.instructions,
                             callback: async () => {
                                 try {
                                     const account = await loginAccountHeadless(flow);
@@ -708,8 +168,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                                         expires: account.expiresAt
                                     };
                                 }
-                                catch (error) {
-                                    console.error('[multi-auth] Headless OAuth authorize failed:', error);
+                                catch {
                                     return { type: 'failed' };
                                 }
                             }
@@ -721,8 +180,16 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                     type: 'api'
                 }
             ]
+        },
+        config: async (config) => {
+            const patch = config.provider?.[PROVIDER_ID] || {};
+            const pluginPatch = patch['multiAuth'] || {};
+            pluginConfig = {
+                ...DEFAULT_CONFIG,
+                ...pluginPatch
+            };
         }
     };
 };
-export default MultiAuthPlugin;
+export default plugin;
 //# sourceMappingURL=index.js.map

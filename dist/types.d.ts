@@ -1,104 +1,47 @@
-export interface AccountCredentials {
-    alias: string;
+export interface StoredAccount {
+    email?: string;
     accessToken: string;
     refreshToken: string;
     idToken?: string;
     accountId?: string;
     expiresAt: number;
-    email?: string;
-    lastRefresh?: string;
-    lastSeenAt?: number;
-    lastActiveUntil?: number;
-    lastUsed?: number;
+    lastRefresh: string;
     usageCount: number;
-    addedAt?: number;
     enabled?: boolean;
-    rateLimitedUntil?: number;
-    modelUnsupportedUntil?: number;
-    modelUnsupportedAt?: number;
-    modelUnsupportedModel?: string;
-    modelUnsupportedError?: string;
-    workspaceDeactivatedUntil?: number;
-    workspaceDeactivatedAt?: number;
-    workspaceDeactivatedError?: string;
+    lastUsed?: number;
+    lastSeenAt?: number;
+    addedAt?: number;
+    source?: 'opencode';
     authInvalid?: boolean;
     authInvalidatedAt?: number;
-    rateLimits?: AccountRateLimits;
-    rateLimitHistory?: RateLimitHistoryEntry[];
-    limitStatus?: LimitStatus;
-    limitError?: string;
-    lastLimitProbeAt?: number;
-    lastLimitErrorAt?: number;
-    tags?: string[];
-    notes?: string;
-    source?: 'opencode' | 'codex';
+    rateLimitedUntil?: number;
+    modelUnsupportedUntil?: number;
+    workspaceDeactivatedUntil?: number;
 }
-export type StoredAccount = Omit<AccountCredentials, 'alias'>;
-export interface RateLimitWindow {
-    limit?: number;
-    remaining?: number;
-    resetAt?: number;
-    updatedAt?: number;
+export interface AccountCredentials extends StoredAccount {
+    alias: string;
 }
-export interface AccountRateLimits {
-    fiveHour?: RateLimitWindow;
-    weekly?: RateLimitWindow;
-}
-export interface RateLimitSnapshot {
-    remaining?: number;
-    limit?: number;
-    resetAt?: number;
-}
-export interface RateLimitHistoryEntry {
-    at: number;
-    fiveHour?: RateLimitSnapshot;
-    weekly?: RateLimitSnapshot;
-}
-export type LimitStatus = 'idle' | 'queued' | 'running' | 'success' | 'error' | 'stopped';
 export interface AccountStore {
     version: 2;
     accounts: StoredAccount[];
     activeIndex: number;
     rotationIndex: number;
-    lastRotation: number;
+}
+export interface LegacyAccountV1 extends StoredAccount {
+    alias?: string;
 }
 export interface AccountStoreV1 {
-    accounts: Record<string, AccountCredentials>;
-    activeAlias: string | null;
-    rotationIndex: number;
-    lastRotation: number;
-}
-export interface OpenAIModel {
-    id: string;
-    object: string;
-    created: number;
-    owned_by: string;
+    version?: 1;
+    accounts: Record<string, LegacyAccountV1>;
+    activeAlias?: string | null;
+    rotationIndex?: number;
 }
 export interface PluginConfig {
-    rotationStrategy: 'round-robin' | 'least-used' | 'random';
-    autoRefreshTokens: boolean;
+    rotationStrategy: 'sticky' | 'round-robin';
     rateLimitCooldownMs: number;
     modelUnsupportedCooldownMs: number;
     workspaceDeactivatedCooldownMs: number;
-    modelFilter: RegExp;
-}
-export interface ProviderModel {
-    name: string;
-    limit: {
-        context: number;
-        output: number;
-    };
-    modalities: {
-        input: string[];
-        output: string[];
-    };
-    options: {
-        reasoningEffort: string;
-        reasoningSummary: string;
-        textVerbosity: string;
-        include: string[];
-        store: boolean;
-    };
+    maxRetries: number;
 }
 export declare const DEFAULT_CONFIG: PluginConfig;
 //# sourceMappingURL=types.d.ts.map

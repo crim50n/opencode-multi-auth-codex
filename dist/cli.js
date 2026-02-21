@@ -1,188 +1,105 @@
 #!/usr/bin/env node
-import { fileURLToPath } from 'node:url';
 import { createDeviceAuthorizationFlow, loginAccount, loginAccountHeadless } from './auth.js';
-import { removeAccount, listAccounts, getStorePath, loadStore } from './store.js';
-import { startWebConsole } from './web.js';
-import { disableService, installService, serviceStatus } from './systemd.js';
-const args = process.argv.slice(2);
-const command = args[0];
-function getFlagValue(flag) {
-    const idx = args.indexOf(flag);
-    if (idx === -1)
-        return undefined;
-    return args[idx + 1];
-}
-async function main() {
-    switch (command) {
-        case 'add':
-        case 'login': {
-            try {
-                const headless = args.includes('--headless');
-                if (headless) {
-                    const flow = await createDeviceAuthorizationFlow();
-                    console.log(`\nOpen: ${flow.url}`);
-                    console.log(flow.instructions);
-                    console.log('Waiting for authorization...');
-                    const account = await loginAccountHeadless(flow);
-                    console.log(`\nAccount added successfully!`);
-                    console.log(`Email: ${account.email || 'unknown'}`);
-                    break;
-                }
-                const account = await loginAccount();
-                console.log(`\nAccount added successfully!`);
-                console.log(`Email: ${account.email || 'unknown'}`);
-            }
-            catch (err) {
-                console.error(`Failed to add account: ${err}`);
-                process.exit(1);
-            }
-            break;
-        }
-        case 'remove':
-        case 'rm': {
-            const target = args[1];
-            if (!target) {
-                console.error('Usage: opencode-multi-auth remove <index|email>');
-                process.exit(1);
-            }
-            const store = loadStore();
-            // Try as index first
-            const asNumber = Number(target);
-            if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber < store.accounts.length) {
-                const acc = store.accounts[asNumber];
-                removeAccount(asNumber);
-                console.log(`Account #${asNumber} (${acc.email || 'unknown'}) removed.`);
-            }
-            else {
-                // Try as email
-                const idx = store.accounts.findIndex((acc) => acc.email === target);
-                if (idx >= 0) {
-                    removeAccount(idx);
-                    console.log(`Account "${target}" removed.`);
-                }
-                else {
-                    console.error(`Account "${target}" not found.`);
-                    process.exit(1);
-                }
-            }
-            break;
-        }
-        case 'list':
-        case 'ls': {
-            const accounts = listAccounts();
-            if (accounts.length === 0) {
-                console.log('No accounts configured.');
-                console.log('Add one with: opencode-multi-auth add');
-            }
-            else {
-                const store = loadStore();
-                console.log('\nConfigured accounts:\n');
-                accounts.forEach((acc, idx) => {
-                    const active = idx === store.activeIndex ? ' (active)' : '';
-                    console.log(`  #${idx}: ${acc.email || 'unknown email'}${active} (uses: ${acc.usageCount})`);
-                });
-                console.log();
-            }
-            break;
-        }
-        case 'status': {
-            const store = loadStore();
-            const accounts = listAccounts();
-            console.log('\n[multi-auth] Account Status\n');
-            console.log('Strategy: round-robin');
-            console.log(`Accounts: ${accounts.length}`);
-            console.log(`Active: ${store.activeIndex >= 0 ? `#${store.activeIndex} (${store.accounts[store.activeIndex]?.email || 'unknown'})` : 'none'}\n`);
-            if (accounts.length === 0) {
-                console.log('No accounts configured. Run: opencode-multi-auth add\n');
-                return;
-            }
-            accounts.forEach((acc, idx) => {
-                const isActive = idx === store.activeIndex ? ' (active)' : '';
-                const isRateLimited = acc.rateLimitedUntil && acc.rateLimitedUntil > Date.now()
-                    ? ` [RATE LIMITED until ${new Date(acc.rateLimitedUntil).toLocaleTimeString()}]`
-                    : '';
-                const isInvalid = acc.authInvalid ? ' [AUTH INVALID]' : '';
-                const expiry = new Date(acc.expiresAt).toLocaleString();
-                console.log(`  #${idx}${isActive}${isRateLimited}${isInvalid}`);
-                console.log(`    Email: ${acc.email || 'unknown'}`);
-                console.log(`    Uses: ${acc.usageCount}`);
-                console.log(`    Token expires: ${expiry}`);
-                console.log();
-            });
-            break;
-        }
-        case 'path': {
-            console.log(getStorePath());
-            break;
-        }
-        case 'web': {
-            const portArg = getFlagValue('--port');
-            const hostArg = getFlagValue('--host');
-            const port = portArg ? Number(portArg) : undefined;
-            if (portArg && Number.isNaN(port)) {
-                console.error('Invalid --port value');
-                process.exit(1);
-            }
-            startWebConsole({ port, host: hostArg });
-            break;
-        }
-        case 'service': {
-            const action = args[1] || 'status';
-            const portArg = getFlagValue('--port');
-            const hostArg = getFlagValue('--host');
-            const port = portArg ? Number(portArg) : undefined;
-            if (portArg && Number.isNaN(port)) {
-                console.error('Invalid --port value');
-                process.exit(1);
-            }
-            const cliPath = fileURLToPath(import.meta.url);
-            if (action === 'install') {
-                const file = installService({ cliPath, host: hostArg, port });
-                console.log(`Installed systemd user service at ${file}`);
-                break;
-            }
-            if (action === 'disable') {
-                disableService();
-                console.log('Disabled codex-soft systemd user service.');
-                break;
-            }
-            serviceStatus();
-            break;
-        }
-        case 'help':
-        case '--help':
-        case '-h':
-        default: {
-            console.log(`
- opencode-multi-auth-codex - Multi-account OAuth rotation for OpenAI Codex
+import { findIndexByEmail, getStorePath, listAccounts, loadStore, removeAccount, setActiveIndex } from './store.js';
+function usage() {
+    console.log(`
+opencode-multi-auth-codex - antigravity-style multi-account for Codex
 
 Commands:
-  add              Add a new account (opens browser for OAuth)
-  add --headless   Add a new account via device-code flow
-  remove <idx|email>  Remove an account by index or email
-  list             List all configured accounts
-  status           Show detailed account status
-  path             Show config file location
-  web              Launch local dashboard (use --port/--host)
-  service          Install/disable systemd user service (install|disable|status)
-  help             Show this help message
-
-Examples:
-  opencode-multi-auth-codex add
-  opencode-multi-auth-codex remove 0
-  opencode-multi-auth-codex remove user@example.com
-  opencode-multi-auth-codex status
-  opencode-multi-auth-codex web --port 3434 --host 127.0.0.1
-  opencode-multi-auth-codex service install --port 3434 --host 127.0.0.1
-
-After adding accounts, the plugin auto-rotates between them.
+  add                Add account with browser OAuth
+  add --headless     Add account with device-code OAuth
+  list               List all accounts
+  status             Show active account
+  use <index>        Set active account index
+  remove <idx|email> Remove account
+  path               Show store file path
 `);
-            break;
-        }
-    }
 }
-main().catch(err => {
-    console.error('Fatal error:', err);
+async function run() {
+    const [, , command, ...args] = process.argv;
+    if (!command || command === 'help' || command === '--help' || command === '-h') {
+        usage();
+        return;
+    }
+    if (command === 'add' || command === 'login') {
+        const headless = args.includes('--headless');
+        if (headless) {
+            const flow = await createDeviceAuthorizationFlow();
+            console.log(`Open: ${flow.url}`);
+            console.log(flow.instructions);
+            const account = await loginAccountHeadless(flow);
+            console.log(`Added: ${account.email || account.alias}`);
+            return;
+        }
+        const account = await loginAccount();
+        console.log(`Added: ${account.email || account.alias}`);
+        return;
+    }
+    if (command === 'list') {
+        const store = loadStore();
+        const accounts = listAccounts();
+        if (accounts.length === 0) {
+            console.log('No accounts configured.');
+            return;
+        }
+        accounts.forEach((account, index) => {
+            const active = index === store.activeIndex ? ' (active)' : '';
+            const status = account.enabled === false ? 'disabled' : account.authInvalid ? 'invalid' : 'ok';
+            console.log(`#${index} ${account.email || account.alias} (${status}) ${active}`);
+        });
+        return;
+    }
+    if (command === 'status') {
+        const store = loadStore();
+        const accounts = listAccounts();
+        if (accounts.length === 0) {
+            console.log('No accounts configured.');
+            return;
+        }
+        const active = accounts[Math.max(0, store.activeIndex)];
+        console.log(`Accounts: ${accounts.length}`);
+        console.log(`Active: ${active.email || active.alias}`);
+        return;
+    }
+    if (command === 'use') {
+        const index = Number.parseInt(args[0] || '', 10);
+        if (!Number.isFinite(index)) {
+            console.error('Usage: use <index>');
+            process.exit(1);
+        }
+        setActiveIndex(index);
+        console.log(`Active account set to #${index}`);
+        return;
+    }
+    if (command === 'remove') {
+        const target = (args[0] || '').trim();
+        if (!target) {
+            console.error('Usage: remove <idx|email>');
+            process.exit(1);
+        }
+        const asIndex = Number.parseInt(target, 10);
+        if (Number.isFinite(asIndex) && String(asIndex) === target) {
+            removeAccount(asIndex);
+            console.log(`Removed #${asIndex}`);
+            return;
+        }
+        const index = findIndexByEmail(target);
+        if (index < 0) {
+            console.error(`Account not found: ${target}`);
+            process.exit(1);
+        }
+        removeAccount(index);
+        console.log(`Removed ${target}`);
+        return;
+    }
+    if (command === 'path') {
+        console.log(getStorePath());
+        return;
+    }
+    usage();
+}
+run().catch((err) => {
+    console.error('Fatal:', err);
     process.exit(1);
 });
 //# sourceMappingURL=cli.js.map

@@ -1,539 +1,233 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import * as crypto from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import lockfile from 'proper-lockfile';
 const STORE_DIR_ENV = 'OPENCODE_MULTI_AUTH_STORE_DIR';
 const STORE_FILE_ENV = 'OPENCODE_MULTI_AUTH_STORE_FILE';
 const DEFAULT_STORE_DIR = path.join(os.homedir(), '.config', 'opencode');
 const DEFAULT_STORE_FILE = 'opencode-multi-auth-codex-accounts.json';
-const LEGACY_STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth');
-const LEGACY_STORE_FILE = path.join(LEGACY_STORE_DIR, 'accounts.json');
-const PREVIOUS_DEFAULT_STORE_FILE = path.join(DEFAULT_STORE_DIR, 'opencode-multi-auth-accounts.json');
-function getStoreDir() {
-    const override = process.env[STORE_DIR_ENV];
-    if (override && override.trim())
-        return path.resolve(override.trim());
-    return DEFAULT_STORE_DIR;
+function storeDir() {
+    return process.env[STORE_DIR_ENV] || DEFAULT_STORE_DIR;
 }
-function getStoreFile() {
-    const override = process.env[STORE_FILE_ENV];
-    if (override && override.trim())
-        return path.resolve(override.trim());
-    return path.join(getStoreDir(), DEFAULT_STORE_FILE);
+function storeFile() {
+    const env = process.env[STORE_FILE_ENV];
+    if (env)
+        return env;
+    return path.join(storeDir(), DEFAULT_STORE_FILE);
 }
-const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE';
-let storeLocked = false;
-let lastStoreError = null;
-let lastStoreEncrypted = false;
-function ensureDir() {
-    const dir = getStoreDir();
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-}
-function maybeMigrateLegacyStore(targetFile) {
-    if (process.env[STORE_DIR_ENV] || process.env[STORE_FILE_ENV])
-        return;
-    if (fs.existsSync(targetFile))
-        return;
-    const candidates = [PREVIOUS_DEFAULT_STORE_FILE, LEGACY_STORE_FILE];
-    const source = candidates.find((file) => fs.existsSync(file));
-    if (!source)
-        return;
-    try {
-        fs.renameSync(source, targetFile);
-        fs.chmodSync(targetFile, 0o600);
-    }
-    catch {
-        try {
-            fs.copyFileSync(source, targetFile);
-            fs.chmodSync(targetFile, 0o600);
-        }
-        catch {
-            // ignore migration failures; loader will continue with empty store
-        }
-    }
+function ensureStoreDir() {
+    const dir = path.dirname(storeFile());
+    if (!existsSync(dir))
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
 function emptyStore() {
     return {
         version: 2,
         accounts: [],
         activeIndex: -1,
-        rotationIndex: 0,
-        lastRotation: Date.now()
+        rotationIndex: 0
     };
 }
-function getPassphrase() {
-    const value = process.env[STORE_ENV_PASSPHRASE];
-    return value && value.trim().length > 0 ? value : null;
+function normalizeEmail(email) {
+    const value = email?.trim().toLowerCase();
+    return value || undefined;
 }
-function isEncryptedFile(payload) {
-    return Boolean(payload && payload.encrypted === true && typeof payload.data === 'string');
-}
-function deriveKey(passphrase, salt) {
-    return crypto.scryptSync(passphrase, salt, 32);
-}
-function encryptStore(store, passphrase) {
-    const salt = crypto.randomBytes(16);
-    const iv = crypto.randomBytes(12);
-    const key = deriveKey(passphrase, salt);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-    const serialized = JSON.stringify(store);
-    const encrypted = Buffer.concat([cipher.update(serialized, 'utf8'), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return {
-        encrypted: true,
-        version: 2,
-        salt: salt.toString('base64'),
-        iv: iv.toString('base64'),
-        tag: tag.toString('base64'),
-        data: encrypted.toString('base64')
-    };
-}
-function decryptStore(file, passphrase) {
-    const salt = Buffer.from(file.salt, 'base64');
-    const iv = Buffer.from(file.iv, 'base64');
-    const tag = Buffer.from(file.tag, 'base64');
-    const data = Buffer.from(file.data, 'base64');
-    const key = deriveKey(passphrase, salt);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAuthTag(tag);
-    const decrypted = Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    return JSON.parse(decrypted);
-}
-function buildSnapshot(window) {
-    if (!window)
-        return undefined;
-    return {
-        remaining: window.remaining,
-        limit: window.limit,
-        resetAt: window.resetAt
-    };
-}
-function buildHistoryEntry(rateLimits) {
-    if (!rateLimits?.fiveHour && !rateLimits?.weekly)
-        return null;
-    const updatedAtValues = [rateLimits?.fiveHour?.updatedAt, rateLimits?.weekly?.updatedAt].filter((value) => typeof value === 'number');
-    const at = updatedAtValues.length > 0 ? Math.max(...updatedAtValues) : Date.now();
-    return {
-        at,
-        fiveHour: buildSnapshot(rateLimits?.fiveHour),
-        weekly: buildSnapshot(rateLimits?.weekly)
-    };
-}
-function appendHistory(history, entry) {
-    const next = history ? [...history] : [];
-    const last = next[next.length - 1];
-    const same = last &&
-        last.fiveHour?.remaining === entry.fiveHour?.remaining &&
-        last.weekly?.remaining === entry.weekly?.remaining &&
-        last.fiveHour?.resetAt === entry.fiveHour?.resetAt &&
-        last.weekly?.resetAt === entry.weekly?.resetAt;
-    if (!same) {
-        next.push(entry);
-    }
-    if (next.length > 160) {
-        return next.slice(next.length - 160);
-    }
-    return next;
-}
-// --- Alias computation (backward compat for web.ts, probe-limits, etc.) ---
-function computeAlias(account, index) {
-    if (account.email) {
+function accountAlias(account, index) {
+    if (account.email)
         return account.email.split('@')[0] || `account-${index}`;
-    }
     return `account-${index}`;
 }
-function assignAliases(accounts) {
-    const seen = new Map();
-    return accounts.map((acc, idx) => {
-        let base = computeAlias(acc, idx);
-        const count = seen.get(base) || 0;
-        seen.set(base, count + 1);
-        const alias = count === 0 ? base : `${base}-${count + 1}`;
-        return { ...acc, alias, usageCount: acc.usageCount ?? 0 };
-    });
-}
-// --- Email deduplication (antigravity-style: keep newest per email) ---
 function deduplicateByEmail(accounts) {
-    const byEmail = new Map();
-    const noEmail = [];
-    for (const acc of accounts) {
-        if (!acc.email) {
-            noEmail.push(acc);
+    const newest = new Map();
+    for (let i = 0; i < accounts.length; i += 1) {
+        const email = normalizeEmail(accounts[i]?.email);
+        if (!email)
+            continue;
+        const prev = newest.get(email);
+        if (prev === undefined) {
+            newest.set(email, i);
             continue;
         }
-        const existing = byEmail.get(acc.email);
-        if (!existing) {
-            byEmail.set(acc.email, acc);
-            continue;
-        }
-        // Keep the one with the newest lastUsed, then addedAt
-        const existingTime = existing.lastUsed || existing.addedAt || 0;
-        const newTime = acc.lastUsed || acc.addedAt || 0;
-        if (newTime > existingTime) {
-            byEmail.set(acc.email, acc);
-        }
+        const prevScore = Math.max(accounts[prev]?.lastUsed || 0, accounts[prev]?.addedAt || 0);
+        const nextScore = Math.max(accounts[i]?.lastUsed || 0, accounts[i]?.addedAt || 0);
+        if (nextScore >= prevScore)
+            newest.set(email, i);
     }
-    return [...byEmail.values(), ...noEmail];
-}
-// --- Migration from v1 (alias-keyed map) to v2 (array-based) ---
-function isV1Store(parsed) {
-    return (parsed &&
-        typeof parsed.accounts === 'object' &&
-        !Array.isArray(parsed.accounts) &&
-        !('version' in parsed));
-}
-function isV2Store(parsed) {
-    return parsed && parsed.version === 2 && Array.isArray(parsed.accounts);
+    if (newest.size === 0)
+        return accounts;
+    return accounts.filter((account, i) => {
+        const email = normalizeEmail(account.email);
+        if (!email)
+            return true;
+        return newest.get(email) === i;
+    });
 }
 function migrateV1toV2(v1) {
-    const accounts = Object.values(v1.accounts).map((acc) => {
-        const { alias, ...rest } = acc;
-        return {
-            ...rest,
-            usageCount: rest.usageCount ?? 0,
-            addedAt: rest.lastSeenAt || Date.now(),
-            enabled: !rest.authInvalid
-        };
-    });
-    const activeIdx = v1.activeAlias
-        ? Object.keys(v1.accounts).indexOf(v1.activeAlias)
-        : -1;
+    const accounts = Object.entries(v1.accounts || {}).map(([alias, acc]) => ({
+        ...acc,
+        email: normalizeEmail(acc.email),
+        usageCount: acc.usageCount || 0,
+        addedAt: acc.addedAt || Date.now(),
+        lastRefresh: acc.lastRefresh || new Date().toISOString(),
+        lastSeenAt: acc.lastSeenAt || Date.now(),
+        source: 'opencode'
+    }));
+    const dedup = deduplicateByEmail(accounts);
+    const activeIndex = (() => {
+        const activeAlias = v1.activeAlias;
+        if (!activeAlias)
+            return dedup.length > 0 ? 0 : -1;
+        const idx = Object.keys(v1.accounts || {}).indexOf(activeAlias);
+        if (idx < 0 || idx >= dedup.length)
+            return dedup.length > 0 ? 0 : -1;
+        return idx;
+    })();
     return {
         version: 2,
-        accounts: deduplicateByEmail(accounts),
-        activeIndex: activeIdx >= 0 ? activeIdx : (accounts.length > 0 ? 0 : -1),
-        rotationIndex: v1.rotationIndex || 0,
-        lastRotation: v1.lastRotation || Date.now()
+        accounts: dedup,
+        activeIndex,
+        rotationIndex: v1.rotationIndex || 0
     };
 }
-// --- Load / Save ---
-export function loadStore() {
-    storeLocked = false;
-    lastStoreError = null;
-    lastStoreEncrypted = false;
-    ensureDir();
-    const file = getStoreFile();
-    maybeMigrateLegacyStore(file);
-    if (fs.existsSync(file)) {
-        try {
-            const data = fs.readFileSync(file, 'utf-8');
-            let parsed = JSON.parse(data);
-            if (isEncryptedFile(parsed)) {
-                lastStoreEncrypted = true;
-                const passphrase = getPassphrase();
-                if (!passphrase) {
-                    storeLocked = true;
-                    lastStoreError = `Store is encrypted. Set ${STORE_ENV_PASSPHRASE} to unlock.`;
-                    return emptyStore();
-                }
-                try {
-                    parsed = decryptStore(parsed, passphrase);
-                }
-                catch (err) {
-                    storeLocked = true;
-                    lastStoreError = 'Failed to decrypt store. Check passphrase.';
-                    console.error('[multi-auth] Failed to decrypt store:', err);
-                    return emptyStore();
-                }
-            }
-            // Migration
-            if (isV1Store(parsed)) {
-                const v2 = migrateV1toV2(parsed);
-                // Save migrated store
-                try {
-                    saveStore(v2);
-                }
-                catch {
-                    // best effort
-                }
-                return v2;
-            }
-            if (isV2Store(parsed)) {
-                // Deduplicate on every load (like antigravity)
-                parsed.accounts = deduplicateByEmail(parsed.accounts);
-                // Clamp activeIndex
-                if (parsed.activeIndex >= parsed.accounts.length) {
-                    parsed.activeIndex = parsed.accounts.length > 0 ? 0 : -1;
-                }
-                return parsed;
-            }
-            // Unknown format - try to parse as v1
-            if (parsed && typeof parsed.accounts === 'object') {
-                if (Array.isArray(parsed.accounts)) {
-                    // Already array but no version marker - treat as v2
-                    return {
-                        version: 2,
-                        accounts: deduplicateByEmail(parsed.accounts),
-                        activeIndex: typeof parsed.activeIndex === 'number' ? parsed.activeIndex : 0,
-                        rotationIndex: parsed.rotationIndex || 0,
-                        lastRotation: parsed.lastRotation || Date.now()
-                    };
-                }
-                return migrateV1toV2(parsed);
-            }
-        }
-        catch {
-            storeLocked = true;
-            lastStoreError = 'Failed to parse store. Store locked until fixed.';
-            console.error('[multi-auth] Failed to parse store, resetting');
-        }
-    }
-    return emptyStore();
-}
-export function saveStore(store) {
-    ensureDir();
-    if (storeLocked) {
-        console.error('[multi-auth] Store locked; refusing to overwrite encrypted file.');
-        return;
-    }
-    const file = getStoreFile();
-    const passphrase = getPassphrase();
-    const payload = passphrase ? encryptStore(store, passphrase) : store;
-    const json = JSON.stringify(payload, null, 2);
-    // Best-effort backup to help recover from crashes/corruption.
+function readStore() {
+    ensureStoreDir();
+    const file = storeFile();
+    if (!existsSync(file))
+        return emptyStore();
     try {
-        if (fs.existsSync(file)) {
-            fs.copyFileSync(file, `${file}.bak`);
-            fs.chmodSync(`${file}.bak`, 0o600);
-        }
+        const raw = readFileSync(file, 'utf8');
+        if (!raw.trim())
+            return emptyStore();
+        const parsed = JSON.parse(raw);
+        const v2 = parsed.version === 2 ? parsed : migrateV1toV2(parsed);
+        const accounts = deduplicateByEmail(v2.accounts || []);
+        const activeIndex = accounts.length === 0 ? -1 : Math.min(Math.max(v2.activeIndex ?? 0, 0), accounts.length - 1);
+        return {
+            version: 2,
+            accounts,
+            activeIndex,
+            rotationIndex: Math.max(v2.rotationIndex || 0, 0)
+        };
     }
     catch {
-        // ignore backup failures
+        return emptyStore();
     }
-    const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-    let fd = null;
+}
+function writeStore(store) {
+    ensureStoreDir();
+    writeFileSync(storeFile(), JSON.stringify(store, null, 2), { mode: 0o600 });
+}
+export async function withStoreLock(fn) {
+    ensureStoreDir();
+    const file = storeFile();
+    if (!existsSync(file))
+        writeStore(emptyStore());
+    const release = await lockfile.lock(file, {
+        retries: { retries: 8, factor: 1.2, minTimeout: 20, maxTimeout: 120 },
+        stale: 15_000,
+        update: 2_000,
+        realpath: false
+    });
     try {
-        fd = fs.openSync(tmp, 'w', 0o600);
-        fs.writeFileSync(fd, json, { encoding: 'utf-8' });
-        try {
-            fs.fsyncSync(fd);
-        }
-        catch {
-            // fsync not supported everywhere; best-effort
-        }
+        const store = readStore();
+        const result = await fn(store);
+        writeStore(store);
+        return result;
     }
     finally {
-        if (fd !== null) {
-            try {
-                fs.closeSync(fd);
-            }
-            catch {
-                // ignore
-            }
-        }
-    }
-    try {
-        fs.renameSync(tmp, file);
-    }
-    catch (err) {
-        // Windows can fail to rename over an existing file.
-        if (err?.code === 'EPERM' || err?.code === 'EEXIST') {
-            try {
-                fs.unlinkSync(file);
-            }
-            catch {
-                // ignore
-            }
-            fs.renameSync(tmp, file);
-        }
-        else {
-            try {
-                fs.unlinkSync(tmp);
-            }
-            catch {
-                // ignore
-            }
-            throw err;
-        }
-    }
-    try {
-        fs.chmodSync(file, 0o600);
-    }
-    catch {
-        // ignore
+        await release();
     }
 }
-export function getStoreDiagnostics() {
-    return {
-        storeDir: getStoreDir(),
-        storeFile: getStoreFile(),
-        locked: storeLocked,
-        encrypted: lastStoreEncrypted,
-        error: lastStoreError
-    };
+export function loadStore() {
+    return readStore();
 }
-// --- Account operations (array-based, antigravity-style) ---
-/** Find account index by email. Returns -1 if not found. */
-export function findIndexByEmail(email) {
-    const store = loadStore();
-    return store.accounts.findIndex((acc) => acc.email === email);
+export function saveStore(store) {
+    writeStore(store);
 }
-/** Find account index by refresh token. Returns -1 if not found. */
-export function findIndexByToken(access, refresh) {
-    const store = loadStore();
-    return store.accounts.findIndex((acc) => {
-        if (access && acc.accessToken === access)
-            return true;
-        if (refresh && acc.refreshToken === refresh)
-            return true;
-        return false;
-    });
+export function listAccounts() {
+    const store = readStore();
+    return store.accounts.map((account, index) => ({
+        ...account,
+        alias: accountAlias(account, index),
+        usageCount: account.usageCount || 0
+    }));
 }
-/** Add or update an account. Deduplicates by email. Returns the store and the account's index. */
-export function addAccount(creds) {
-    const store = loadStore();
-    const entry = buildHistoryEntry(creds.rateLimits);
-    const newAccount = {
-        ...creds,
+export function addAccount(account) {
+    const store = readStore();
+    const now = Date.now();
+    const email = normalizeEmail(account.email);
+    const next = {
+        ...account,
+        email,
         usageCount: 0,
-        addedAt: creds.addedAt || Date.now(),
-        enabled: creds.enabled !== false,
-        rateLimitHistory: entry ? [entry] : creds.rateLimitHistory
+        addedAt: account.addedAt || now,
+        lastSeenAt: account.lastSeenAt || now,
+        lastRefresh: account.lastRefresh || new Date(now).toISOString(),
+        source: 'opencode'
     };
-    // Dedup by email: if same email exists, update it instead
-    if (creds.email) {
-        const existingIdx = store.accounts.findIndex((acc) => acc.email === creds.email);
-        if (existingIdx >= 0) {
-            const existing = store.accounts[existingIdx];
-            store.accounts[existingIdx] = {
-                ...existing,
-                ...newAccount,
-                usageCount: existing.usageCount || 0,
-                addedAt: existing.addedAt || newAccount.addedAt,
-                rateLimitHistory: entry
-                    ? appendHistory(existing.rateLimitHistory, entry)
-                    : existing.rateLimitHistory || newAccount.rateLimitHistory
+    if (email) {
+        const existingIndex = store.accounts.findIndex((a) => normalizeEmail(a.email) === email);
+        if (existingIndex >= 0) {
+            store.accounts[existingIndex] = {
+                ...store.accounts[existingIndex],
+                ...next,
+                usageCount: store.accounts[existingIndex].usageCount || 0
             };
-            saveStore(store);
-            return { store, index: existingIdx };
+            store.activeIndex = existingIndex;
+            writeStore(store);
+            return { store, index: existingIndex };
         }
     }
-    // New account
-    store.accounts.push(newAccount);
+    store.accounts.push(next);
     const index = store.accounts.length - 1;
-    if (store.activeIndex < 0) {
-        store.activeIndex = index;
-    }
-    saveStore(store);
+    store.activeIndex = index;
+    writeStore(store);
     return { store, index };
 }
-/** Remove account by index. Returns updated store. */
+export function updateAccount(index, updates) {
+    const store = readStore();
+    if (index < 0 || index >= store.accounts.length)
+        return store;
+    store.accounts[index] = { ...store.accounts[index], ...updates };
+    writeStore(store);
+    return store;
+}
+export function setActiveIndex(index) {
+    const store = readStore();
+    if (index < 0 || index >= store.accounts.length)
+        return store;
+    store.activeIndex = index;
+    writeStore(store);
+    return store;
+}
 export function removeAccount(index) {
-    const store = loadStore();
+    const store = readStore();
     if (index < 0 || index >= store.accounts.length)
         return store;
     store.accounts.splice(index, 1);
-    // Adjust activeIndex
     if (store.accounts.length === 0) {
         store.activeIndex = -1;
-    }
-    else if (store.activeIndex === index) {
-        store.activeIndex = 0;
-    }
-    else if (store.activeIndex > index) {
-        store.activeIndex -= 1;
-    }
-    // Adjust rotationIndex
-    if (store.rotationIndex >= store.accounts.length) {
         store.rotationIndex = 0;
     }
-    saveStore(store);
+    else {
+        store.activeIndex = Math.min(Math.max(store.activeIndex, 0), store.accounts.length - 1);
+        store.rotationIndex = store.rotationIndex % store.accounts.length;
+    }
+    writeStore(store);
     return store;
 }
-/** Remove account by email. Returns updated store. */
-export function removeAccountByEmail(email) {
-    const idx = findIndexByEmail(email);
-    if (idx < 0)
-        return loadStore();
-    return removeAccount(idx);
+export function findIndexByEmail(email) {
+    const needle = normalizeEmail(email);
+    if (!needle)
+        return -1;
+    const store = readStore();
+    return store.accounts.findIndex((a) => normalizeEmail(a.email) === needle);
 }
-/** Update account at index. Returns updated store. */
-export function updateAccount(index, updates) {
-    const store = loadStore();
-    if (index < 0 || index >= store.accounts.length)
-        return store;
-    const current = store.accounts[index];
-    const next = { ...current, ...updates };
-    if (updates.rateLimits || next.rateLimits) {
-        const entry = buildHistoryEntry(next.rateLimits);
-        if (entry) {
-            next.rateLimitHistory = appendHistory(current.rateLimitHistory, entry);
-        }
-    }
-    store.accounts[index] = next;
-    saveStore(store);
-    return store;
-}
-/** Update account by alias (backward compat for web.ts etc.). */
-export function updateAccountByAlias(alias, updates) {
-    const accounts = listAccounts();
-    const idx = accounts.findIndex((acc) => acc.alias === alias);
-    if (idx < 0)
-        return loadStore();
-    return updateAccount(idx, updates);
-}
-/** Set active account by index. */
-export function setActiveIndex(index) {
-    const store = loadStore();
-    const now = Date.now();
-    if (index < 0 || index >= store.accounts.length) {
-        store.activeIndex = store.accounts.length > 0 ? 0 : -1;
-        saveStore(store);
-        return store;
-    }
-    const previousIndex = store.activeIndex;
-    if (previousIndex >= 0 && previousIndex < store.accounts.length && previousIndex !== index) {
-        store.accounts[previousIndex] = {
-            ...store.accounts[previousIndex],
-            lastActiveUntil: now
-        };
-    }
-    store.activeIndex = index;
-    store.accounts[index] = {
-        ...store.accounts[index],
-        lastSeenAt: now,
-        lastActiveUntil: undefined
-    };
-    store.rotationIndex = index;
-    store.lastRotation = now;
-    saveStore(store);
-    return store;
-}
-/** Get the currently active account (with computed alias). */
-export function getActiveAccount() {
-    const store = loadStore();
-    if (store.activeIndex < 0 || store.activeIndex >= store.accounts.length)
-        return null;
-    const acc = store.accounts[store.activeIndex];
-    return { ...acc, alias: computeAlias(acc, store.activeIndex), usageCount: acc.usageCount ?? 0 };
-}
-/** List all accounts with computed aliases. */
-export function listAccounts() {
-    const store = loadStore();
-    return assignAliases(store.accounts);
+export function findIndexByAlias(alias) {
+    const store = readStore();
+    return store.accounts.findIndex((account, index) => accountAlias(account, index) === alias);
 }
 export function getStorePath() {
-    return getStoreFile();
+    return storeFile();
 }
-export function getStoreStatus() {
-    const diag = getStoreDiagnostics();
-    return { locked: diag.locked, encrypted: diag.encrypted, error: diag.error };
-}
-/** Remove account by alias (backward compat for web.ts etc.). */
-export function removeAccountByAlias(alias) {
-    const accounts = listAccounts();
-    const idx = accounts.findIndex((acc) => acc.alias === alias);
-    if (idx < 0)
-        return loadStore();
-    return removeAccount(idx);
-}
-/** Resolve alias to index (backward compat). Returns -1 if not found. */
-export function resolveAlias(alias) {
-    const accounts = listAccounts();
-    return accounts.findIndex((acc) => acc.alias === alias);
-}
-// Backward compat: aliases for old API surface used by web.ts etc.
-export { setActiveIndex as setActiveAlias };
 //# sourceMappingURL=store.js.map
