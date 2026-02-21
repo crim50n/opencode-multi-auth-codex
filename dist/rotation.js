@@ -14,7 +14,7 @@ export async function getNextAccount(config) {
     if (aliases.length === 0) {
         const diag = getStoreDiagnostics();
         const extra = diag.error ? ` (${diag.error})` : '';
-        console.error(`[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>${extra}`);
+        console.error(`[multi-auth] No accounts configured. Run: opencode-multi-auth add${extra}`);
         if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
             console.error(`[multi-auth] store file: ${diag.storeFile}`);
         }

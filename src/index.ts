@@ -539,7 +539,7 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
         const accounts = listAccounts()
 
         if (accounts.length === 0) {
-          console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>')
+          console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add')
           return {}
         }
 
@@ -801,30 +801,20 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
           label: 'ChatGPT OAuth (Multi-Account)',
           type: 'oauth' as const,
 
-          prompts: [
-            {
-              type: 'text' as const,
-              key: 'alias',
-              message: 'Account alias (e.g., personal, work)',
-              placeholder: 'personal'
-            }
-          ],
-
           /**
            * OAuth flow - opens browser for ChatGPT login
            */
-          authorize: async (inputs?: Record<string, string>) => {
-            const alias = inputs?.alias || `account-${Date.now()}`
+          authorize: async () => {
             const flow = await createAuthorizationFlow()
 
             return {
               url: flow.url,
               method: 'auto' as const,
-              instructions: `Login with your ChatGPT Plus/Pro account for "${alias}"`,
+              instructions: 'Login with your ChatGPT Plus/Pro account',
 
               callback: async () => {
                 try {
-                  const account = await loginAccount(alias, flow)
+                  const account = await loginAccount(undefined, flow)
                   return {
                     type: 'success' as const,
                     provider: PROVIDER_ID,

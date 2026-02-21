@@ -17,14 +17,9 @@ async function main() {
     switch (command) {
         case 'add':
         case 'login': {
-            if (!alias) {
-                console.error('Usage: opencode-multi-auth add <alias>');
-                console.error('Example: opencode-multi-auth add work');
-                process.exit(1);
-            }
             try {
                 const account = await loginAccount(alias);
-                console.log(`\nAccount "${alias}" added successfully!`);
+                console.log(`\nAccount "${account.alias}" added successfully!`);
                 console.log(`Email: ${account.email || 'unknown'}`);
             }
             catch (err) {
@@ -48,7 +43,7 @@ async function main() {
             const accounts = listAccounts();
             if (accounts.length === 0) {
                 console.log('No accounts configured.');
-                console.log('Add one with: opencode-multi-auth add <alias>');
+                console.log('Add one with: opencode-multi-auth add');
             }
             else {
                 console.log('\nConfigured accounts:\n');
@@ -67,7 +62,7 @@ async function main() {
             console.log(`Accounts: ${accounts.length}`);
             console.log(`Active: ${store.activeAlias || 'none'}\n`);
             if (accounts.length === 0) {
-                console.log('No accounts configured. Run: opencode-multi-auth add <alias>\n');
+                console.log('No accounts configured. Run: opencode-multi-auth add\n');
                 return;
             }
             for (const acc of accounts) {
@@ -130,7 +125,7 @@ async function main() {
 opencode-multi-auth - Multi-account OAuth rotation for OpenAI Codex
 
 Commands:
-  add <alias>      Add a new account (opens browser for OAuth)
+  add [alias]      Add a new account (opens browser for OAuth)
   remove <alias>   Remove an account
   list             List all configured accounts
   status           Show detailed account status
@@ -140,9 +135,8 @@ Commands:
   help             Show this help message
 
 Examples:
-  opencode-multi-auth add personal
+  opencode-multi-auth add
   opencode-multi-auth add work
-  opencode-multi-auth add backup
   opencode-multi-auth status
   opencode-multi-auth web --port 3434 --host 127.0.0.1
   opencode-multi-auth service install --port 3434 --host 127.0.0.1

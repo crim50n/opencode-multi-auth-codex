@@ -59,10 +59,11 @@ bun link
 ## Add Your Accounts
 
 ```bash
-# Add each account (opens browser for OAuth)
-opencode-multi-auth add personal
-opencode-multi-auth add work  
-opencode-multi-auth add backup
+# Add accounts one by one (run again for each account)
+opencode-multi-auth add
+
+# optional: set custom alias explicitly
+opencode-multi-auth add work
 
 # Each command opens your browser - log in with a different ChatGPT account each time
 ```
@@ -295,7 +296,7 @@ Optional fallback: use a file path plugin entry if installs are blocked:
 
 | Command | Description |
 |---------|-------------|
-| `add <alias>` | Add new account via OAuth (opens browser) |
+| `add [alias]` | Add new account via OAuth (alias optional) |
 | `remove <alias>` | Remove an account |
 | `list` | List all configured accounts |
 | `status` | Detailed status with usage counts |

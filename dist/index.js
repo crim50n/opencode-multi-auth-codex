@@ -485,7 +485,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                 await syncAuthFromOpenCode(getAuth);
                 const accounts = listAccounts();
                 if (accounts.length === 0) {
-                    console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add <alias>');
+                    console.log('[multi-auth] No accounts configured. Run: opencode-multi-auth add');
                     return {};
                 }
                 // Custom fetch with multi-account rotation
@@ -682,27 +682,18 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                 {
                     label: 'ChatGPT OAuth (Multi-Account)',
                     type: 'oauth',
-                    prompts: [
-                        {
-                            type: 'text',
-                            key: 'alias',
-                            message: 'Account alias (e.g., personal, work)',
-                            placeholder: 'personal'
-                        }
-                    ],
                     /**
                      * OAuth flow - opens browser for ChatGPT login
                      */
-                    authorize: async (inputs) => {
-                        const alias = inputs?.alias || `account-${Date.now()}`;
+                    authorize: async () => {
                         const flow = await createAuthorizationFlow();
                         return {
                             url: flow.url,
                             method: 'auto',
-                            instructions: `Login with your ChatGPT Plus/Pro account for "${alias}"`,
+                            instructions: 'Login with your ChatGPT Plus/Pro account',
                             callback: async () => {
                                 try {
-                                    const account = await loginAccount(alias, flow);
+                                    const account = await loginAccount(undefined, flow);
                                     return {
                                         type: 'success',
                                         provider: PROVIDER_ID,

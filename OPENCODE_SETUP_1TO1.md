@@ -199,7 +199,6 @@ In OpenCode:
 - Providers / Auth
 - OpenAI
 - Choose **"ChatGPT OAuth (Multi-Account)"**
-- Enter an alias (e.g. `acc1`, `work`, `backup`)
 - Complete login in your browser
 
 Repeat for each account.
@@ -207,8 +206,8 @@ Repeat for each account.
 ### Option B: Plugin CLI
 
 ```bash
-opencode-multi-auth add acc1
-opencode-multi-auth add acc2
+opencode-multi-auth add
+opencode-multi-auth add
 opencode-multi-auth status
 ```
 
@@ -288,7 +287,7 @@ This is almost always account-level.
 
 Fix:
 
-- Re-login that specific alias.
+- Re-login that specific account.
 
 ### Check plugin loading
 

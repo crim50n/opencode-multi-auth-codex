@@ -30,6 +30,25 @@ export async function createAuthorizationFlow() {
     authUrl.searchParams.set('originator', 'codex_cli_rs');
     return { pkce, state, url: authUrl.toString() };
 }
+function normalizeAlias(value) {
+    const normalized = value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+    return normalized.replace(/^-+|-+$/g, '') || 'account';
+}
+function resolveAlias(preferredAlias, email) {
+    const existing = new Set(Object.keys(loadStore().accounts));
+    const source = preferredAlias && preferredAlias.trim().length > 0
+        ? preferredAlias
+        : (email || 'account').split('@')[0];
+    const base = normalizeAlias(source || 'account');
+    if (!existing.has(base)) {
+        return base;
+    }
+    let index = 2;
+    while (existing.has(`${base}-${index}`)) {
+        index += 1;
+    }
+    return `${base}-${index}`;
+}
 export async function loginAccount(alias, flow) {
     const activeFlow = flow ?? await createAuthorizationFlow();
     const { pkce, state } = activeFlow;
@@ -103,7 +122,8 @@ export async function loginAccount(alias, flow) {
                 }
                 const accountId = getAccountIdFromClaims(idClaims) ||
                     getAccountIdFromClaims(accessClaims);
-                const store = addAccount(alias, {
+                const accountAlias = resolveAlias(alias, email);
+                const store = addAccount(accountAlias, {
                     accessToken: tokens.access_token,
                     refreshToken: tokens.refresh_token,
                     idToken: tokens.id_token,
@@ -116,12 +136,12 @@ export async function loginAccount(alias, flow) {
                     authInvalid: false,
                     authInvalidatedAt: undefined
                 });
-                const account = store.accounts[alias];
+                const account = store.accounts[accountAlias];
                 res.writeHead(200, { 'Content-Type': 'text/html' });
                 res.end(`
           <html>
             <body style="font-family: system-ui; padding: 40px; text-align: center;">
-              <h1>Account "${alias}" authenticated!</h1>
+              <h1>Account "${accountAlias}" authenticated!</h1>
               <p>${email || 'Unknown email'}</p>
               <p>You can close this window.</p>
             </body>
@@ -138,7 +158,8 @@ export async function loginAccount(alias, flow) {
             }
         });
         server.listen(REDIRECT_PORT, () => {
-            console.log(`\n[multi-auth] Login for account "${alias}"`);
+            const displayAlias = alias && alias.trim().length > 0 ? alias.trim() : 'auto-generated';
+            console.log(`\n[multi-auth] Login for account "${displayAlias}"`);
             console.log(`[multi-auth] Open this URL in your browser:\n`);
             console.log(`  ${activeFlow.url}\n`);
             console.log(`[multi-auth] Waiting for callback on port ${REDIRECT_PORT}...`);
