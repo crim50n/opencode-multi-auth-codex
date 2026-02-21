@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import * as http from 'http'
 import * as net from 'node:net'
 import * as url from 'url'
+import { ProxyAgent, type Dispatcher } from 'undici'
 import { addAccount, updateAccount, loadStore } from './store.js'
 import {
   decodeJwtPayload,
@@ -24,6 +25,75 @@ const DEVICE_REDIRECT_URI = `${OPENAI_ISSUER}/deviceauth/callback`
 const DEVICE_VERIFY_URL = `${OPENAI_ISSUER}/codex/device`
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 const SCOPES = ['openid', 'profile', 'email', 'offline_access']
+
+let proxyCache: { key: string; dispatcher: Dispatcher } | null = null
+
+function getNoProxyList(): string[] {
+  return (process.env.NO_PROXY || process.env.no_proxy || '')
+    .split(',')
+    .map((v) => v.trim().toLowerCase())
+    .filter(Boolean)
+}
+
+function isNoProxyHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  const rules = getNoProxyList()
+  if (rules.includes('*')) return true
+  return rules.some((rule) => {
+    const normalized = rule.replace(/^\./, '')
+    if (!normalized) return false
+    if (host === normalized) return true
+    return host.endsWith(`.${normalized}`)
+  })
+}
+
+function resolveProxyForUrl(rawUrl: string): string | null {
+  const explicit = process.env.OPENCODE_MULTI_AUTH_PROXY_URL?.trim()
+  if (explicit) return explicit
+
+  const parsed = new URL(rawUrl)
+  if (isNoProxyHost(parsed.hostname)) return null
+
+  if (parsed.protocol === 'https:') {
+    return (
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.ALL_PROXY ||
+      process.env.all_proxy ||
+      null
+    )
+  }
+
+  return (
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    process.env.ALL_PROXY ||
+    process.env.all_proxy ||
+    null
+  )
+}
+
+function getDispatcherForUrl(rawUrl: string): Dispatcher | undefined {
+  const proxyUrl = resolveProxyForUrl(rawUrl)
+  if (!proxyUrl) return undefined
+  if (proxyCache && proxyCache.key === proxyUrl) return proxyCache.dispatcher
+  const dispatcher = new ProxyAgent(proxyUrl)
+  proxyCache = { key: proxyUrl, dispatcher }
+  return dispatcher
+}
+
+async function fetchWithProxy(rawUrl: string, init?: RequestInit): Promise<Response> {
+  const dispatcher = getDispatcherForUrl(rawUrl)
+  if (!dispatcher) return fetch(rawUrl, init)
+  return fetch(rawUrl, { ...(init || {}), dispatcher } as RequestInit & { dispatcher: Dispatcher })
+}
+
+function getDeviceUserAgent(): string {
+  const explicit = process.env.OPENCODE_MULTI_AUTH_USER_AGENT?.trim()
+  if (explicit) return explicit
+  const hostVersion = process.env.OPENCODE_VERSION?.trim() || process.env.npm_package_version?.trim() || 'unknown'
+  return `opencode/${hostVersion}`
+}
 
 interface TokenResponse {
   access_token: string
@@ -104,17 +174,20 @@ export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
 }
 
 export async function createDeviceAuthorizationFlow(): Promise<DeviceAuthorizationFlow> {
-  const response = await fetch(DEVICE_CODE_URL, {
+  const userAgent = getDeviceUserAgent()
+  const response = await fetchWithProxy(DEVICE_CODE_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'User-Agent': 'opencode-multi-auth-codex'
+      'Accept': 'application/json',
+      'User-Agent': userAgent
     },
     body: JSON.stringify({ client_id: CLIENT_ID })
   })
 
   if (!response.ok) {
-    throw new Error(`Failed to initiate device authorization: ${response.status}`)
+    const body = (await response.text().catch(() => '')).trim()
+    throw new Error(`Failed to initiate device authorization: ${response.status}${body ? ` ${body}` : ''}`)
   }
 
   const data = (await response.json()) as DeviceAuthCodeResponse
@@ -130,7 +203,7 @@ export async function createDeviceAuthorizationFlow(): Promise<DeviceAuthorizati
 }
 
 async function exchangeCodeForTokens(code: string, redirectUri: string, codeVerifier: string): Promise<TokenResponse> {
-  const response = await fetch(TOKEN_URL, {
+  const response = await fetchWithProxy(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -161,7 +234,7 @@ async function storeTokensAsAccount(tokens: TokenResponse): Promise<AccountCrede
 
   let email: string | undefined = getEmailFromClaims(idClaims) || getEmailFromClaims(accessClaims)
   try {
-    const userRes = await fetch(`${OPENAI_ISSUER}/userinfo`, {
+    const userRes = await fetchWithProxy(`${OPENAI_ISSUER}/userinfo`, {
       headers: { Authorization: `Bearer ${tokens.access_token}` }
     })
     if (userRes.ok) {
@@ -200,12 +273,14 @@ async function storeTokensAsAccount(tokens: TokenResponse): Promise<AccountCrede
 }
 
 export async function loginAccountHeadless(flow: DeviceAuthorizationFlow): Promise<AccountCredentials> {
+  const userAgent = getDeviceUserAgent()
   while (true) {
-    const response = await fetch(DEVICE_TOKEN_URL, {
+    const response = await fetchWithProxy(DEVICE_TOKEN_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'opencode-multi-auth-codex'
+        'Accept': 'application/json',
+        'User-Agent': userAgent
       },
       body: JSON.stringify({
         device_auth_id: flow.deviceAuthId,
@@ -353,7 +428,7 @@ export async function refreshToken(index: number): Promise<AccountCredentials | 
   const label = account.email || `#${index}`
 
   try {
-    const tokenRes = await fetch(TOKEN_URL, {
+    const tokenRes = await fetchWithProxy(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({

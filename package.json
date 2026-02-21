@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-auth-codex",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,8 @@
     "web": "node ./dist/cli.js web --port 3434 --host 127.0.0.1"
   },
   "dependencies": {
-    "@openauthjs/openauth": "^0.4.3"
+    "@openauthjs/openauth": "^0.4.3",
+    "undici": "^7.16.0"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.0.150"

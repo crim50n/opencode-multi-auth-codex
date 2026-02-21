@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import * as http from 'http';
 import * as net from 'node:net';
 import * as url from 'url';
+import { ProxyAgent } from 'undici';
 import { addAccount, updateAccount, loadStore } from './store.js';
 import { decodeJwtPayload, getAccountIdFromClaims, getEmailFromClaims, getExpiryFromClaims } from './codex-auth.js';
 // OpenAI OAuth endpoints (same as official Codex CLI)
@@ -17,6 +18,70 @@ const DEVICE_REDIRECT_URI = `${OPENAI_ISSUER}/deviceauth/callback`;
 const DEVICE_VERIFY_URL = `${OPENAI_ISSUER}/codex/device`;
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000;
 const SCOPES = ['openid', 'profile', 'email', 'offline_access'];
+let proxyCache = null;
+function getNoProxyList() {
+    return (process.env.NO_PROXY || process.env.no_proxy || '')
+        .split(',')
+        .map((v) => v.trim().toLowerCase())
+        .filter(Boolean);
+}
+function isNoProxyHost(hostname) {
+    const host = hostname.toLowerCase();
+    const rules = getNoProxyList();
+    if (rules.includes('*'))
+        return true;
+    return rules.some((rule) => {
+        const normalized = rule.replace(/^\./, '');
+        if (!normalized)
+            return false;
+        if (host === normalized)
+            return true;
+        return host.endsWith(`.${normalized}`);
+    });
+}
+function resolveProxyForUrl(rawUrl) {
+    const explicit = process.env.OPENCODE_MULTI_AUTH_PROXY_URL?.trim();
+    if (explicit)
+        return explicit;
+    const parsed = new URL(rawUrl);
+    if (isNoProxyHost(parsed.hostname))
+        return null;
+    if (parsed.protocol === 'https:') {
+        return (process.env.HTTPS_PROXY ||
+            process.env.https_proxy ||
+            process.env.ALL_PROXY ||
+            process.env.all_proxy ||
+            null);
+    }
+    return (process.env.HTTP_PROXY ||
+        process.env.http_proxy ||
+        process.env.ALL_PROXY ||
+        process.env.all_proxy ||
+        null);
+}
+function getDispatcherForUrl(rawUrl) {
+    const proxyUrl = resolveProxyForUrl(rawUrl);
+    if (!proxyUrl)
+        return undefined;
+    if (proxyCache && proxyCache.key === proxyUrl)
+        return proxyCache.dispatcher;
+    const dispatcher = new ProxyAgent(proxyUrl);
+    proxyCache = { key: proxyUrl, dispatcher };
+    return dispatcher;
+}
+async function fetchWithProxy(rawUrl, init) {
+    const dispatcher = getDispatcherForUrl(rawUrl);
+    if (!dispatcher)
+        return fetch(rawUrl, init);
+    return fetch(rawUrl, { ...(init || {}), dispatcher });
+}
+function getDeviceUserAgent() {
+    const explicit = process.env.OPENCODE_MULTI_AUTH_USER_AGENT?.trim();
+    if (explicit)
+        return explicit;
+    const hostVersion = process.env.OPENCODE_VERSION?.trim() || process.env.npm_package_version?.trim() || 'unknown';
+    return `opencode/${hostVersion}`;
+}
 function generateState() {
     return randomBytes(32).toString('base64url');
 }
@@ -56,16 +121,19 @@ export async function createAuthorizationFlow() {
     return { pkce, state, url: authUrl.toString(), redirectUri, redirectPort };
 }
 export async function createDeviceAuthorizationFlow() {
-    const response = await fetch(DEVICE_CODE_URL, {
+    const userAgent = getDeviceUserAgent();
+    const response = await fetchWithProxy(DEVICE_CODE_URL, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'User-Agent': 'opencode-multi-auth-codex'
+            'Accept': 'application/json',
+            'User-Agent': userAgent
         },
         body: JSON.stringify({ client_id: CLIENT_ID })
     });
     if (!response.ok) {
-        throw new Error(`Failed to initiate device authorization: ${response.status}`);
+        const body = (await response.text().catch(() => '')).trim();
+        throw new Error(`Failed to initiate device authorization: ${response.status}${body ? ` ${body}` : ''}`);
     }
     const data = (await response.json());
     const intervalSeconds = Math.max(Number.parseInt(data.interval || '5', 10) || 5, 1);
@@ -78,7 +146,7 @@ export async function createDeviceAuthorizationFlow() {
     };
 }
 async function exchangeCodeForTokens(code, redirectUri, codeVerifier) {
-    const response = await fetch(TOKEN_URL, {
+    const response = await fetchWithProxy(TOKEN_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -104,7 +172,7 @@ async function storeTokensAsAccount(tokens) {
     const expiresAt = getExpiryFromClaims(accessClaims) || getExpiryFromClaims(idClaims) || now + tokens.expires_in * 1000;
     let email = getEmailFromClaims(idClaims) || getEmailFromClaims(accessClaims);
     try {
-        const userRes = await fetch(`${OPENAI_ISSUER}/userinfo`, {
+        const userRes = await fetchWithProxy(`${OPENAI_ISSUER}/userinfo`, {
             headers: { Authorization: `Bearer ${tokens.access_token}` }
         });
         if (userRes.ok) {
@@ -139,12 +207,14 @@ async function storeTokensAsAccount(tokens) {
     };
 }
 export async function loginAccountHeadless(flow) {
+    const userAgent = getDeviceUserAgent();
     while (true) {
-        const response = await fetch(DEVICE_TOKEN_URL, {
+        const response = await fetchWithProxy(DEVICE_TOKEN_URL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'User-Agent': 'opencode-multi-auth-codex'
+                'Accept': 'application/json',
+                'User-Agent': userAgent
             },
             body: JSON.stringify({
                 device_auth_id: flow.deviceAuthId,
@@ -269,7 +339,7 @@ export async function refreshToken(index) {
     }
     const label = account.email || `#${index}`;
     try {
-        const tokenRes = await fetch(TOKEN_URL, {
+        const tokenRes = await fetchWithProxy(TOKEN_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
