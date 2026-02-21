@@ -4,8 +4,11 @@ import * as os from 'os';
 import * as crypto from 'node:crypto';
 const STORE_DIR_ENV = 'OPENCODE_MULTI_AUTH_STORE_DIR';
 const STORE_FILE_ENV = 'OPENCODE_MULTI_AUTH_STORE_FILE';
-const DEFAULT_STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth');
-const DEFAULT_STORE_FILE = 'accounts.json';
+const DEFAULT_STORE_DIR = path.join(os.homedir(), '.config', 'opencode');
+const DEFAULT_STORE_FILE = 'opencode-multi-auth-codex-accounts.json';
+const LEGACY_STORE_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth');
+const LEGACY_STORE_FILE = path.join(LEGACY_STORE_DIR, 'accounts.json');
+const PREVIOUS_DEFAULT_STORE_FILE = path.join(DEFAULT_STORE_DIR, 'opencode-multi-auth-accounts.json');
 function getStoreDir() {
     const override = process.env[STORE_DIR_ENV];
     if (override && override.trim())
@@ -26,6 +29,29 @@ function ensureDir() {
     const dir = getStoreDir();
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+}
+function maybeMigrateLegacyStore(targetFile) {
+    if (process.env[STORE_DIR_ENV] || process.env[STORE_FILE_ENV])
+        return;
+    if (fs.existsSync(targetFile))
+        return;
+    const candidates = [PREVIOUS_DEFAULT_STORE_FILE, LEGACY_STORE_FILE];
+    const source = candidates.find((file) => fs.existsSync(file));
+    if (!source)
+        return;
+    try {
+        fs.renameSync(source, targetFile);
+        fs.chmodSync(targetFile, 0o600);
+    }
+    catch {
+        try {
+            fs.copyFileSync(source, targetFile);
+            fs.chmodSync(targetFile, 0o600);
+        }
+        catch {
+            // ignore migration failures; loader will continue with empty store
+        }
     }
 }
 function emptyStore() {
@@ -189,6 +215,7 @@ export function loadStore() {
     lastStoreEncrypted = false;
     ensureDir();
     const file = getStoreFile();
+    maybeMigrateLegacyStore(file);
     if (fs.existsSync(file)) {
         try {
             const data = fs.readFileSync(file, 'utf-8');

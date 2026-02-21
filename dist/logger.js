@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-const DEFAULT_LOG_DIR = path.join(os.homedir(), '.config', 'opencode-multi-auth', 'logs');
+const DEFAULT_LOG_DIR = path.join(os.homedir(), '.config', 'opencode', 'logs');
 const LOG_FILE = process.env.CODEX_SOFT_LOG_PATH || path.join(DEFAULT_LOG_DIR, 'codex-soft.log');
 const MAX_LOG_LINES = 400;
 function ensureDir() {

@@ -132,7 +132,7 @@ update limits for any stored token without switching the active device token.
 
 ### Optional Store Encryption
 
-Set `CODEX_SOFT_STORE_PASSPHRASE` to encrypt `~/.config/opencode-multi-auth/accounts.json` at rest:
+Set `CODEX_SOFT_STORE_PASSPHRASE` to encrypt `~/.config/opencode/opencode-multi-auth-codex-accounts.json` at rest:
 
 ```bash
 export CODEX_SOFT_STORE_PASSPHRASE="your-passphrase"
@@ -157,7 +157,7 @@ opencode-multi-auth service disable
 
 ### Logs
 
-The dashboard writes logs to `~/.config/opencode-multi-auth/logs/codex-soft.log` by default.
+The dashboard writes logs to `~/.config/opencode/logs/codex-soft.log` by default.
 Override with `CODEX_SOFT_LOG_PATH` if you want a custom path.
 
 ## Configure OpenCode
@@ -290,7 +290,7 @@ Optional fallback: use a file path plugin entry if installs are blocked:
 | **Rate Limits** | Auto-skips rate-limited account for 5 min, uses next |
 | **Token Refresh** | Auto-refreshes tokens before expiry |
 | **Models** | Auto-discovers GPT-5.x models from OpenAI API |
-| **Storage** | `~/.config/opencode-multi-auth/accounts.json` |
+| **Storage** | `~/.config/opencode/opencode-multi-auth-codex-accounts.json` |
 
 ## CLI Commands
 
